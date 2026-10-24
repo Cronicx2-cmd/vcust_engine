@@ -215,59 +215,74 @@ void main() {
 }
 )";
 
+
 static const char* SCENE_FS = R"(
 #version 330 core
+
 in vec3 vColor;
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
 in float vChecker;
+
 out vec4 FragColor;
 
 uniform sampler2D uFloorTex;
 uniform sampler2D uWallTex;
 
 void main() {
-    vec3 baseColor;
-    if (vChecker > 0.5) {
-        baseColor = texture(uFloorTex, vUV).rgb;
-    } else {
-        baseColor = texture(uWallTex, vUV).rgb;
-        
-        // --- USUWANIE POMARAŃCZOWYCH PLAM ---
-        // Jeśli czerwony kanał mocno dominuje nad niebieskim (rdza/pomarańcz), przyciemniamy go do zera
-        if (baseColor.r > baseColor.b * 1.3 && baseColor.r > 0.25) {
-            baseColor *= 0.05; // Wtapiamy w ciemną fugę
-        } else {
-            // Reszta ściany w czystych odcieniach szarości
-            float gray = dot(baseColor, vec3(0.299, 0.587, 0.114));
-            baseColor = vec3(gray);
-        }
-    }
-    
-    if (length(baseColor) < 0.05) {
-        baseColor = vChecker > 0.5 ? vec3(0.4, 0.4, 0.4) : vec3(0.05, 0.05, 0.05); // Zmieniono pomarańcz na ciemną szarość
-    }
-    
-    // --- BAKED LIGHTING (Proceduralne) ---
-    vec3 finalColor = baseColor * 0.7;
-    
-    float heightFactor = clamp(vWorldPos.y * 0.2, 0.0, 0.4);
-    finalColor += baseColor * heightFactor;
-    
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-    float diff = max(dot(normalize(vNormal), lightDir), 0.0);
-    finalColor += baseColor * diff * 0.2;
-    
-    float edgeShadow = 1.0;
-    if (vChecker < 0.5) {
-        edgeShadow = clamp(vWorldPos.y / 1.5, 0.3, 1.0);
-    }
-    finalColor *= edgeShadow;
+    bool isFloor = vChecker > 0.5;
 
-    FragColor = vec4(finalColor, 1.0);
+    vec3 texColor = isFloor
+        ? texture(uFloorTex, vUV).rgb
+        : texture(uWallTex, vUV).rgb;
+
+    // Odrzucamy pomarańczowe przebarwienia tekstury ścian,
+    // ale zachowujemy szczegóły materiału.
+    if (!isFloor) {
+        float orange = smoothstep(
+            texColor.b * 1.15 + 0.04,
+            texColor.b * 1.55 + 0.12,
+            texColor.r
+        );
+
+        texColor = mix(
+            texColor,
+            vec3(dot(texColor, vec3(0.299, 0.587, 0.114))),
+            orange
+        );
+    }
+
+    // Zabezpieczenie przed pustymi lub prawie czarnymi teksturami.
+    if (dot(texColor, vec3(0.333)) < 0.025) {
+        texColor = isFloor
+            ? vec3(0.32, 0.34, 0.36)
+            : vec3(0.12, 0.14, 0.16);
+    }
+
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(vec3(-0.4, 0.85, 0.3));
+
+    float diffuse = max(dot(N, L), 0.0);
+
+    // Łagodne oświetlenie, zamiast jednolitego koloru kostek.
+    float ambient = isFloor ? 0.42 : 0.32;
+    float lighting = ambient + diffuse * 0.48;
+
+    // Delikatne przyciemnienie dolnych części ścian.
+    float heightShade = isFloor
+        ? 1.0
+        : mix(0.72, 1.0, smoothstep(-0.5, 2.0, vWorldPos.y));
+
+    vec3 color = texColor * lighting * heightShade;
+
+    // Subtelny chłodny odcień pasujący do Vcust Engine.
+    color *= vec3(0.94, 0.98, 1.02);
+
+    FragColor = vec4(color, 1.0);
 }
 )";
+
 
 static const char* UI_VS = R"(
 #version 330 core
@@ -294,17 +309,19 @@ void main() {
     
     // Dla celownika (uMode == 2.0) używamy stałej pozycji (0,0) i małego rozmiaru
     if (uMode > 1.5) {
-        gl_Position = vec4(c * 0.015, 0.0, 1.0); // Rysujemy na środku ekranu
+        gl_Position = vec4(c * 0.06, 0.0, 1.0); // Rysujemy na środku ekranu
     } else {
         gl_Position = vec4(uCenter.x + c.x * uHalfSize.x, uCenter.y - c.y * uHalfSize.y, 0.0, 1.0);
     }
 }
 )";
 
+
 static const char* UI_FS = R"(
 #version 330 core
 in vec2 vUV;
 out vec4 FragColor;
+
 uniform sampler2D uMap;
 uniform float uMode;
 uniform vec2 uPlayerXZ;
@@ -313,32 +330,63 @@ uniform float uMapSin;
 uniform float uWorldRadius;
 uniform vec2 uMapOrigin;
 uniform float uMapWorldSize;
+
 void main() {
+    // CROSSHAIR — minimalistyczny błękit w stylu Portal
     if (uMode > 1.5) {
-        // Celownik: rysujemy biały krzyżyk z przezroczystym środkiem
-        float dist = length(vUV);
-        if (dist < 0.1) discard; // Pusty środek
-        if (abs(vUV.x) < 0.1 || abs(vUV.y) < 0.1) {
-            FragColor = vec4(1.0, 1.0, 1.0, 0.8); // Białe linie
+        // Obsługa obu typowych zakresów UV.
+        vec2 p = abs(vUV);
+
+        bool verticalArm =
+            p.x < 0.035 &&
+            p.y > 0.10 &&
+            p.y < 0.65;
+
+        bool horizontalArm =
+            p.y < 0.035 &&
+            p.x > 0.10 &&
+            p.x < 0.65;
+
+        if (verticalArm || horizontalArm) {
+            FragColor = vec4(0.38, 0.80, 1.0, 1.0);
         } else {
             discard;
         }
+
         return;
     }
-    
-    // ... (reszta kodu dla minimapy i strzałki bez zmian)
+
+    // Kształt okrągłej minimapy
     if (length(vUV) > 0.5) discard;
-    if (uMode > 0.5) { FragColor = vec4(1.0, 0.85, 0.1, 1.0); return; }
+
+    // Znacznik gracza
+    if (uMode > 0.5) {
+        FragColor = vec4(0.30, 0.76, 1.0, 1.0);
+        return;
+    }
+
+    // Tekstura mapy
     vec2 l = vUV * 2.0 * uWorldRadius;
-    vec2 w = uPlayerXZ + vec2(uMapCos * l.x + uMapSin * l.y, -uMapSin * l.x + uMapCos * l.y);
+    vec2 w = uPlayerXZ + vec2(
+        uMapCos * l.x + uMapSin * l.y,
+        -uMapSin * l.x + uMapCos * l.y
+    );
+
     vec2 t = (w - uMapOrigin) / uMapWorldSize;
     vec4 tex = texture(uMap, clamp(t, 0.0, 1.0));
-    float inside = (all(greaterThanEqual(t, vec2(0.0))) && all(lessThanEqual(t, vec2(1.0)))) ? tex.a : 0.0;
+
+    float inside =
+        (all(greaterThanEqual(t, vec2(0.0))) &&
+         all(lessThanEqual(t, vec2(1.0))))
+        ? tex.a : 0.0;
+
     vec3 col = mix(vec3(0.04, 0.05, 0.07), tex.rgb, inside);
     col = mix(col, vec3(0.9), smoothstep(0.455, 0.47, length(vUV)));
+
     FragColor = vec4(col, 0.85);
 }
 )";
+
 
 static const char* GUN_VS = R"(
 #version 330 core
@@ -867,61 +915,156 @@ void OpenGLEngine::drawMinimap(const Scene&, const Minimap&, const UiPush& radar
     glEnable(GL_DEPTH_TEST);
 }
 
+
 void OpenGLEngine::renderHealthbar(int w, int h) {
     if (w <= 0 || h <= 0) return;
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     glUseProgram(menuShader_);
     glBindVertexArray(quadVAO_);
 
-    // --- USTAWIENIA GEOMETRII (Miks Quake/Portal) ---
-    // Lewy dolny róg, ale z lekkim marginesem
-    const float marginX = 0.04f; 
-    const float marginY = 0.06f;
-    
-    // Pozycja w NDC (lewy dolny róg to -1, -1)
-    const float barCenterY = -1.0f + marginY;
-    const float barHalfH   = 0.015f; // Cienki, minimalistyczny pasek
-    
-    // Szerokość paska
-    const float barHalfW   = 0.35f;
+    // Vcust HUD: Half-Life 1 x Portal
+    constexpr float marginX = 0.045f;
+    constexpr float marginY = 0.065f;
+    constexpr float barHalfW = 0.22f;
+    constexpr float barHalfH = 0.010f;
+
     const float barCenterX = -1.0f + marginX + barHalfW;
+    const float barCenterY = -1.0f + marginY;
 
-    // Kolor zależny od zdrowia (Zielony -> Żółty -> Czerwony)
-    float healthNorm = glm::clamp(health / 100.0f, 0.0f, 1.0f);
-    glm::vec4 healthColor;
-    if (healthNorm > 0.5f) {
-        // Zielony do żółtego
-        float t = (healthNorm - 0.5f) * 2.0f;
-        healthColor = glm::vec4(1.0f - t, 0.8f + t * 0.2f, 0.0f, 0.9f);
-    } else {
-        // Żółty do czerwonego
-        float t = healthNorm * 2.0f;
-        healthColor = glm::vec4(1.0f, t * 0.8f, 0.0f, 0.9f);
-    }
+    const float healthNorm =
+        glm::clamp(health / 100.0f, 0.0f, 1.0f);
 
-    // 1. Tło paska (ciemne, przezroczyste, jak w Portalu)
-    glUniform1f(glGetUniformLocation(menuShader_, "uUseTex"), 0.0f);
-    glUniform2f(glGetUniformLocation(menuShader_, "uCenter"), barCenterX, barCenterY);
-    glUniform2f(glGetUniformLocation(menuShader_, "uHalfSize"), barHalfW, barHalfH);
-    glUniform4f(glGetUniformLocation(menuShader_, "uColor"), 0.05f, 0.05f, 0.05f, 0.6f);
+    glUniform1f(
+        glGetUniformLocation(menuShader_, "uUseTex"),
+        0.0f
+    );
+
+    // Ciemne, półprzezroczyste tło.
+    glUniform2f(
+        glGetUniformLocation(menuShader_, "uCenter"),
+        barCenterX, barCenterY
+    );
+
+    glUniform2f(
+        glGetUniformLocation(menuShader_, "uHalfSize"),
+        barHalfW, barHalfH
+    );
+
+    glUniform4f(
+        glGetUniformLocation(menuShader_, "uColor"),
+        0.015f, 0.035f, 0.055f, 0.82f
+    );
+
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    // 2. Wypełnienie paska (kolorowe)
+    // Błękitne wypełnienie zależne od zdrowia.
     if (healthNorm > 0.001f) {
-        float fillHalfW = barHalfW * healthNorm;
-        float fillCenterX = -1.0f + marginX + fillHalfW;
-        
-        glUniform2f(glGetUniformLocation(menuShader_, "uCenter"), fillCenterX, barCenterY);
-        glUniform2f(glGetUniformLocation(menuShader_, "uHalfSize"), fillHalfW, barHalfH * 0.7f); // Trochę węższy od tła
-        glUniform4fv(glGetUniformLocation(menuShader_, "uColor"), 1, glm::value_ptr(healthColor));
+        const float fillHalfW = barHalfW * healthNorm;
+        const float fillCenterX =
+            -1.0f + marginX + fillHalfW;
+
+        glUniform2f(
+            glGetUniformLocation(menuShader_, "uCenter"),
+            fillCenterX, barCenterY
+        );
+
+        glUniform2f(
+            glGetUniformLocation(menuShader_, "uHalfSize"),
+            fillHalfW, barHalfH * 0.65f
+        );
+
+        glUniform4f(
+            glGetUniformLocation(menuShader_, "uColor"),
+            0.25f, 0.72f, 1.0f, 0.95f
+        );
+
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
-    // 3. Cyfry (opcjonalnie, ale dodają klimatu Quake'a)
-    // Na razie pomijamy, bo nie mamy renderowania tekstu.
+    // Cienka linia Aperture nad paskiem.
+    glUniform2f(
+        glGetUniformLocation(menuShader_, "uCenter"),
+        barCenterX, barCenterY + barHalfH * 0.72f
+    );
+
+    glUniform2f(
+        glGetUniformLocation(menuShader_, "uHalfSize"),
+        barHalfW, 0.0012f
+    );
+
+    glUniform4f(
+        glGetUniformLocation(menuShader_, "uColor"),
+        0.42f, 0.84f, 1.0f, 0.75f
+    );
+
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    
+    // 3. Licznik HP — cyfry siedmiosegmentowe w błękicie Portal
+    glUniform1f(glGetUniformLocation(menuShader_, "uUseTex"), 0.0f);
+
+    auto drawHpRect = [&](float x, float y, float halfW, float halfH) {
+        glUniform2f(glGetUniformLocation(menuShader_, "uCenter"), x, y);
+        glUniform2f(glGetUniformLocation(menuShader_, "uHalfSize"), halfW, halfH);
+        glUniform4f(glGetUniformLocation(menuShader_, "uColor"),
+                    0.38f, 0.80f, 1.0f, 1.0f);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    };
+
+    // Segmenty: góra, prawy-góra, prawy-dół, dół,
+    // lewy-dół, lewy-góra, środek.
+    const bool digits[10][7] = {
+        {1,1,1,1,1,1,0}, // 0
+        {0,1,1,0,0,0,0}, // 1
+        {1,1,0,1,1,0,1}, // 2
+        {1,1,1,1,0,0,1}, // 3
+        {0,1,1,0,0,1,1}, // 4
+        {1,0,1,1,0,1,1}, // 5
+        {1,0,1,1,1,1,1}, // 6
+        {1,1,1,0,0,0,0}, // 7
+        {1,1,1,1,1,1,1}, // 8
+        {1,1,1,1,0,1,1}  // 9
+    };
+
+    auto drawHpDigit = [&](int digit, float x, float y) {
+        const float hw = 0.011f;
+        const float hh = 0.003f;
+        const float vx = 0.013f;
+        const float vy = 0.010f;
+        const float vw = 0.003f;
+        const float vh = 0.009f;
+
+        const bool* s = digits[digit];
+
+        if (s[0]) drawHpRect(x,      y + 0.020f, hw, hh);
+        if (s[1]) drawHpRect(x + vx, y + vy,     vw, vh);
+        if (s[2]) drawHpRect(x + vx, y - vy,     vw, vh);
+        if (s[3]) drawHpRect(x,      y - 0.020f, hw, hh);
+        if (s[4]) drawHpRect(x - vx, y - vy,     vw, vh);
+        if (s[5]) drawHpRect(x - vx, y + vy,     vw, vh);
+        if (s[6]) drawHpRect(x,      y,          hw, hh);
+    };
+
+    const int hp = static_cast<int>(
+        glm::clamp(health, 0.0f, 100.0f)
+    );
+
+    const std::string hpText = std::to_string(hp);
+    const float hpY = barCenterY;
+    const float hpStartX = -0.5f;
+    const float hpSpacing = 0.036f;
+
+    for (size_t i = 0; i < hpText.size(); ++i) {
+        drawHpDigit(
+            hpText[i] - '0',
+            hpStartX + static_cast<float>(i) * hpSpacing,
+            hpY
+        );
+    }
 
     glBindVertexArray(0);
     glDisable(GL_BLEND);
