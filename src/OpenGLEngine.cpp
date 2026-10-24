@@ -6,45 +6,75 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include "Enemy.hpp"
 #include <glm/gtc/type_ptr.hpp>
+#include <algorithm>
+#include <cstddef>
+#include <fstream>
 #include <iostream>
-#include <fstream> // <--- DODANE
+#include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
-#include <sstream> // Upewnij się, że ss też ma do dyspozycji stringstream (często jest w iostream, ale warto mieć)
 
 // ── Helpery ──
-static GLuint compileShader(GLenum type, const std::string& src) {
-    GLuint s = glCreateShader(type);
-    const char* p = src.c_str();
-    glShaderSource(s, 1, &p, nullptr);
-    glCompileShader(s);
-    GLint ok = 0;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+static GLuint compileShader(GLenum type, const std::string& source) {
+    const GLuint shader = glCreateShader(type);
+    if (shader == 0) {
+        throw std::runtime_error("OpenGL could not create a shader.");
+    }
+
+    const char* sourcePtr = source.c_str();
+    glShaderSource(shader, 1, &sourcePtr, nullptr);
+    glCompileShader(shader);
+
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (compiled == GL_FALSE) {
+        char log[1024]{};
+        glGetShaderInfoLog(shader, static_cast<GLsizei>(sizeof(log)), nullptr, log);
+        glDeleteShader(shader);
         throw std::runtime_error(std::string("Shader compile error: ") + log);
     }
-    return s;
+
+    return shader;
 }
 
-static GLuint makeShader(const char* vertSrc, const char* fragSrc) {
-    GLuint vs = compileShader(GL_VERTEX_SHADER, vertSrc);
-    GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragSrc);
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    GLint ok = 0;
-    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-        throw std::runtime_error(std::string("Link error: ") + log);
+static GLuint makeShader(const char* vertexSource, const char* fragmentSource) {
+    const GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexSource);
+    GLuint fragmentShader = 0;
+    GLuint program = 0;
+
+    try {
+        fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentSource);
+        program = glCreateProgram();
+        if (program == 0) {
+            throw std::runtime_error("OpenGL could not create a shader program.");
+        }
+
+        glAttachShader(program, vertexShader);
+        glAttachShader(program, fragmentShader);
+        glLinkProgram(program);
+
+        GLint linked = GL_FALSE;
+        glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        if (linked == GL_FALSE) {
+            char log[1024]{};
+            glGetProgramInfoLog(program, static_cast<GLsizei>(sizeof(log)), nullptr, log);
+            throw std::runtime_error(std::string("Shader link error: ") + log);
+        }
+    } catch (...) {
+        if (program != 0) {
+            glDeleteProgram(program);
+        }
+        if (fragmentShader != 0) {
+            glDeleteShader(fragmentShader);
+        }
+        glDeleteShader(vertexShader);
+        throw;
     }
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    return prog;
+
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+    return program;
 }
 
 static void makeCubeVAO(GLuint& vao, GLuint& vbo) {
@@ -92,17 +122,36 @@ static void makeQuadVAO(GLuint& vao, GLuint& vbo) {
     glBindVertexArray(0);
 }
 
-static GLuint makeTexture(const Image& img) {
-    GLuint tex;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, img.w, img.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.rgba.data());
+static GLuint makeTexture(const Image& image) {
+    if (image.w <= 0 || image.h <= 0 || image.rgba.empty()) {
+        return 0;
+    }
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    if (texture == 0) {
+        return 0;
+    }
+
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_SRGB8_ALPHA8,
+        image.w,
+        image.h,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        image.rgba.data()
+    );
     glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    return tex;
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
 }
 
 // ── Shadery ──
@@ -398,44 +447,135 @@ void main() {
 }
 )";
 
-OpenGLEngine::OpenGLEngine(const std::string& title, uint32_t w, uint32_t h, std::filesystem::path shaderDir)
+OpenGLEngine::OpenGLEngine(
+    const std::string& title,
+    uint32_t width,
+    uint32_t height,
+    std::filesystem::path shaderDir
+)
     : shaderDir_(std::move(shaderDir)) {
-    if (!glfwInit()) throw std::runtime_error("glfwInit failed");
+    if (!glfwInit()) {
+        throw std::runtime_error("glfwInit failed");
+    }
+
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    window_ = glfwCreateWindow(int(w), int(h), title.c_str(), nullptr, nullptr);
-    if (!window_) throw std::runtime_error("glfwCreateWindow failed");
+
+    window_ = glfwCreateWindow(
+        static_cast<int>(width),
+        static_cast<int>(height),
+        title.c_str(),
+        nullptr,
+        nullptr
+    );
+    if (!window_) {
+        glfwTerminate();
+        throw std::runtime_error("glfwCreateWindow failed");
+    }
+
     glfwMakeContextCurrent(window_);
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) throw std::runtime_error("glad load failed");
+    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
+        glfwDestroyWindow(window_);
+        window_ = nullptr;
+        glfwTerminate();
+        throw std::runtime_error("glad load failed");
+    }
+
     glfwSwapInterval(1);
     setupGL();
 
-    // --- INICJALIZACJA AUDIO (krok 4) ---
-    if (ma_engine_init(NULL, &audioEngine_) == MA_SUCCESS) {
+    if (ma_engine_init(nullptr, &audioEngine_) == MA_SUCCESS) {
         audioInitialized_ = true;
-        // Próbujemy wczytać dźwięk strzału (jeśli istnieje)
-        std::string soundPath = (std::filesystem::absolute(std::filesystem::path(title)).parent_path() / "content" / "sounds" / "shot.wav").string();
-        // Uwaga: title to nazwa okna, a nie ścieżka. Lepiej użyć shaderDir_!
-        
-        std::string soundPathCorrect = (shaderDir_.parent_path() / "content" / "sounds" / "shot.wav").string();
-        
-        if (ma_sound_init_from_file(&audioEngine_, soundPathCorrect.c_str(), 0, NULL, NULL, &shotSound_) != MA_SUCCESS) {
-            std::cerr << "Nie można wczytać dźwięku: " << soundPathCorrect << "\n";
+        const auto soundPath =
+            (shaderDir_.parent_path() / "content" / "sounds" / "shot.wav").string();
+
+        if (ma_sound_init_from_file(
+                &audioEngine_, soundPath.c_str(), 0, nullptr, nullptr, &shotSound_
+            ) == MA_SUCCESS) {
+            shotSoundInitialized_ = true;
+        } else {
+            std::cerr << "Nie można wczytać dźwięku: " << soundPath << '\n';
         }
+    } else {
+        std::cerr << "Nie można zainicjalizować silnika audio.\n";
     }
-    // -------------------------------------
 }
 
 OpenGLEngine::~OpenGLEngine() {
-    if (bgTex_) glDeleteTextures(1, &bgTex_);
-    if (mapTex_) glDeleteTextures(1, &mapTex_);
-    if (floorTex_) glDeleteTextures(1, &floorTex_);
-    if (wallTex_) glDeleteTextures(1, &wallTex_);
-    if (window_) glfwDestroyWindow(window_);
+    // All GL resources must be released while the context still exists.
+    if (window_) {
+        glfwMakeContextCurrent(window_);
+    }
+
     if (audioInitialized_) {
-        ma_sound_uninit(&shotSound_);
+        if (shotSoundInitialized_) {
+            ma_sound_uninit(&shotSound_);
+            shotSoundInitialized_ = false;
+        }
         ma_engine_uninit(&audioEngine_);
+        audioInitialized_ = false;
+    }
+
+    for (auto& button : menuButtons_) {
+        if (button.textureID != 0) {
+            const GLuint texture = static_cast<GLuint>(button.textureID);
+            glDeleteTextures(1, &texture);
+            button.textureID = 0;
+        }
+    }
+
+    const GLuint textures[] = {
+        bgTex_, mapTex_, floorTex_, wallTex_, menuBgTex_, gunTexture_
+    };
+    for (const GLuint texture : textures) {
+        if (texture != 0) {
+            glDeleteTextures(1, &texture);
+        }
+    }
+
+    const GLuint programs[] = {
+        skyboxShader_, sceneShader_, uiShader_, gunShader_, muzzleShader_, menuShader_
+    };
+    for (const GLuint program : programs) {
+        if (program != 0) {
+            glDeleteProgram(program);
+        }
+    }
+
+    const GLuint vertexArrays[] = {skyboxVAO_, cubeVAO_, quadVAO_, muzzleVAO_};
+    for (const GLuint vertexArray : vertexArrays) {
+        if (vertexArray != 0) {
+            glDeleteVertexArrays(1, &vertexArray);
+        }
+    }
+
+    const GLuint buffers[] = {skyboxVBO_, cubeVBO_, quadVBO_, muzzleVBO_};
+    for (const GLuint buffer : buffers) {
+        if (buffer != 0) {
+            glDeleteBuffers(1, &buffer);
+        }
+    }
+
+    // Model's destructor runs after this destructor body; zero the handles first
+    // so it does not try to delete them after the GLFW context has been destroyed.
+    if (gunModel_.ebo != 0) {
+        glDeleteBuffers(1, &gunModel_.ebo);
+        gunModel_.ebo = 0;
+    }
+    if (gunModel_.vbo != 0) {
+        glDeleteBuffers(1, &gunModel_.vbo);
+        gunModel_.vbo = 0;
+    }
+    if (gunModel_.vao != 0) {
+        glDeleteVertexArrays(1, &gunModel_.vao);
+        gunModel_.vao = 0;
+    }
+    gunModel_.indexCount = 0;
+
+    if (window_) {
+        glfwDestroyWindow(window_);
+        window_ = nullptr;
     }
     glfwTerminate();
 }
@@ -448,17 +588,15 @@ void OpenGLEngine::setupGL() {
     muzzleShader_ = makeShader(MUZZLE_VS, MUZZLE_FS);
     menuShader_ = makeShader(MENU_VS, MENU_FS);
 
-    GLuint tmpVbo = 0;
-    makeQuadVAO(skyboxVAO_, tmpVbo);
-    makeQuadVAO(quadVAO_, tmpVbo);
-    makeCubeVAO(cubeVAO_, tmpVbo);
+    makeQuadVAO(skyboxVAO_, skyboxVBO_);
+    makeQuadVAO(quadVAO_, quadVBO_);
+    makeCubeVAO(cubeVAO_, cubeVBO_);
 
     // --- NOWY BLOK DLA MUZZLE FLASH ---
-    GLuint muzzleVbo = 0; // NOWA ZMIENNA! (nie nadpisujemy tmpVbo)
     glGenVertexArrays(1, &muzzleVAO_);
-    glGenBuffers(1, &muzzleVbo);
+    glGenBuffers(1, &muzzleVBO_);
     glBindVertexArray(muzzleVAO_);
-    glBindBuffer(GL_ARRAY_BUFFER, muzzleVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, muzzleVBO_);
     
     // Używamy QUADA (6 wierzchołków) zamiast trójkąta, żeby bloom był okrągły
     float muzzleVerts[] = {
@@ -590,14 +728,20 @@ void OpenGLEngine::drawGun(const Camera& camera, int w, int h, bool isShooting) 
     glClear(GL_DEPTH_BUFFER_BIT);
     glUseProgram(gunShader_);
 
-    const float dt = 0.016f; // Przybliżony delta time
+    const double now = glfwGetTime();
+    const float dt = lastFrameTime_ > 0.0
+        ? std::clamp(static_cast<float>(now - lastFrameTime_), 0.0f, 0.05f)
+        : (1.0f / 60.0f);
+    lastFrameTime_ = now;
 
     // 2. Logika strzelania (Fire Rate - "piu piu piu")
     if (isShooting && fireCooldown_ <= 0.0f) {
         shotPulse_ = 1.0f;        
         fireCooldown_ = 0.1f;     // 10 strzałów na sekundę
-        ma_sound_seek_to_pcm_frame(&shotSound_, 0); // Przewiń na początek
-        ma_sound_start(&shotSound_);                // Odtwórz
+        if (shotSoundInitialized_) {
+            ma_sound_seek_to_pcm_frame(&shotSound_, 0);
+            ma_sound_start(&shotSound_);
+        }
     }
     if (fireCooldown_ > 0.0f) fireCooldown_ -= dt;
     
@@ -861,6 +1005,13 @@ void OpenGLEngine::drawMenu() {
 }
 
 void OpenGLEngine::loadMenu(const std::string& path) {
+    for (auto& button : menuButtons_) {
+        if (button.textureID != 0) {
+            const GLuint texture = static_cast<GLuint>(button.textureID);
+            glDeleteTextures(1, &texture);
+            button.textureID = 0;
+        }
+    }
     menuButtons_.clear();
     std::ifstream file(path);
     if (!file) return;
