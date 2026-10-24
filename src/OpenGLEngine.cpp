@@ -1,0 +1,942 @@
+#define MINIAUDIO_IMPLEMENTATION
+#include "external/miniaudio.h"
+
+#include "OpenGLEngine.hpp"
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
+#include "Enemy.hpp"
+#include <glm/gtc/type_ptr.hpp>
+#include <iostream>
+#include <fstream> // <--- DODANE
+#include <stdexcept>
+#include <vector>
+#include <sstream> // Upewnij się, że ss też ma do dyspozycji stringstream (często jest w iostream, ale warto mieć)
+
+// ── Helpery ──
+static GLuint compileShader(GLenum type, const std::string& src) {
+    GLuint s = glCreateShader(type);
+    const char* p = src.c_str();
+    glShaderSource(s, 1, &p, nullptr);
+    glCompileShader(s);
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+        throw std::runtime_error(std::string("Shader compile error: ") + log);
+    }
+    return s;
+}
+
+static GLuint makeShader(const char* vertSrc, const char* fragSrc) {
+    GLuint vs = compileShader(GL_VERTEX_SHADER, vertSrc);
+    GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragSrc);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+        throw std::runtime_error(std::string("Link error: ") + log);
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return prog;
+}
+
+static void makeCubeVAO(GLuint& vao, GLuint& vbo) {
+    struct V { glm::vec3 pos, nrm; glm::vec2 uv; };
+    const float h = 0.5f;
+    std::vector<V> verts = {
+        // +X
+        {{ h,-h,-h}, { 1,0,0}, {0,0}}, {{ h,-h, h}, { 1,0,0}, {1,0}}, {{ h, h, h}, { 1,0,0}, {1,1}},
+        {{ h,-h,-h}, { 1,0,0}, {0,0}}, {{ h, h, h}, { 1,0,0}, {1,1}}, {{ h, h,-h}, { 1,0,0}, {0,1}},
+        // -X
+        {{-h,-h, h}, {-1,0,0}, {0,0}}, {{-h,-h,-h}, {-1,0,0}, {1,0}}, {{-h, h,-h}, {-1,0,0}, {1,1}},
+        {{-h,-h, h}, {-1,0,0}, {0,0}}, {{-h, h,-h}, {-1,0,0}, {1,1}}, {{-h, h, h}, {-1,0,0}, {0,1}},
+        // +Y
+        {{-h, h, h}, {0, 1,0}, {0,0}}, {{ h, h, h}, {0, 1,0}, {1,0}}, {{ h, h,-h}, {0, 1,0}, {1,1}},
+        {{-h, h, h}, {0, 1,0}, {0,0}}, {{ h, h,-h}, {0, 1,0}, {1,1}}, {{-h, h,-h}, {0, 1,0}, {0,1}},
+        // -Y
+        {{-h,-h,-h}, {0,-1,0}, {0,0}}, {{ h,-h,-h}, {0,-1,0}, {1,0}}, {{ h,-h, h}, {0,-1,0}, {1,1}},
+        {{-h,-h,-h}, {0,-1,0}, {0,0}}, {{ h,-h, h}, {0,-1,0}, {1,1}}, {{-h,-h, h}, {0,-1,0}, {0,1}},
+        // +Z
+        {{-h,-h, h}, {0,0, 1}, {0,0}}, {{ h,-h, h}, {0,0, 1}, {1,0}}, {{ h, h, h}, {0,0, 1}, {1,1}},
+        {{-h,-h, h}, {0,0, 1}, {0,0}}, {{ h, h, h}, {0,0, 1}, {1,1}}, {{-h, h, h}, {0,0, 1}, {0,1}},
+        // -Z
+        {{ h,-h,-h}, {0,0,-1}, {0,0}}, {{-h,-h,-h}, {0,0,-1}, {1,0}}, {{-h, h,-h}, {0,0,-1}, {1,1}},
+        {{ h,-h,-h}, {0,0,-1}, {0,0}}, {{-h, h,-h}, {0,0,-1}, {1,1}}, {{ h, h,-h}, {0,0,-1}, {0,1}},
+    };
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(V), verts.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(V), (void*)offsetof(V, pos));
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(V), (void*)offsetof(V, nrm));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(V), (void*)offsetof(V, uv));
+    glBindVertexArray(0);
+}
+
+static void makeQuadVAO(GLuint& vao, GLuint& vbo) {
+    float verts[] = { -1,-1,  1,-1,  1, 1,  -1,-1,  1, 1, -1, 1 };
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2*sizeof(float), (void*)0);
+    glBindVertexArray(0);
+}
+
+static GLuint makeTexture(const Image& img) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, img.w, img.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.rgba.data());
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    return tex;
+}
+
+// ── Shadery ──
+static const char* SKYBOX_VS = R"(
+#version 330 core
+layout(location=0) in vec2 aPos;
+out vec2 vNDC;
+void main() { vNDC = aPos; gl_Position = vec4(aPos, 0.0, 1.0); }
+)";
+
+static const char* SKYBOX_FS = R"(
+#version 330 core
+in vec2 vNDC;
+out vec4 FragColor;
+uniform mat4 uInvViewProj;
+uniform vec3 uCamPos;
+uniform sampler2D uBg;
+void main() {
+    vec4 ndc = vec4(vNDC, 0.0, 1.0);
+    vec4 world = uInvViewProj * ndc;
+    vec3 dir = normalize(world.xyz / world.w - uCamPos);
+    float yaw   = atan(dir.x, dir.z);
+    float pitch = asin(clamp(dir.y, -1.0, 1.0));
+    vec2 uv = vec2(yaw / (2.0 * 3.14159265) + 0.5, 0.5 - pitch / 3.14159265);
+    FragColor = vec4(texture(uBg, uv).rgb, 1.0);
+}
+)";
+
+static const char* SCENE_VS = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in vec2 aUV;
+
+uniform mat4 uVP;
+uniform vec3 uOffset;
+uniform vec3 uScale;
+uniform vec4 uColor;
+
+out vec3 vColor;
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+out float vChecker;
+
+void main() {
+    vec3 world = uOffset + aPos * uScale;
+    vWorldPos = world;
+    vNormal = aNrm;
+    vChecker = uColor.a;
+    vColor = uColor.rgb;
+    
+    if (abs(vNormal.y) > 0.5) {
+        vUV = world.xz * 0.25;
+    } else {
+        if (abs(vNormal.x) > 0.5) vUV = world.zy * 0.25;
+        else vUV = world.xy * 0.25;
+    }
+    
+    gl_Position = uVP * vec4(world, 1.0);
+}
+)";
+
+static const char* SCENE_FS = R"(
+#version 330 core
+in vec3 vColor;
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+in float vChecker;
+out vec4 FragColor;
+
+uniform sampler2D uFloorTex;
+uniform sampler2D uWallTex;
+
+void main() {
+    vec3 baseColor;
+    if (vChecker > 0.5) {
+        baseColor = texture(uFloorTex, vUV).rgb;
+    } else {
+        baseColor = texture(uWallTex, vUV).rgb;
+        
+        // --- USUWANIE POMARAŃCZOWYCH PLAM ---
+        // Jeśli czerwony kanał mocno dominuje nad niebieskim (rdza/pomarańcz), przyciemniamy go do zera
+        if (baseColor.r > baseColor.b * 1.3 && baseColor.r > 0.25) {
+            baseColor *= 0.05; // Wtapiamy w ciemną fugę
+        } else {
+            // Reszta ściany w czystych odcieniach szarości
+            float gray = dot(baseColor, vec3(0.299, 0.587, 0.114));
+            baseColor = vec3(gray);
+        }
+    }
+    
+    if (length(baseColor) < 0.05) {
+        baseColor = vChecker > 0.5 ? vec3(0.4, 0.4, 0.4) : vec3(0.05, 0.05, 0.05); // Zmieniono pomarańcz na ciemną szarość
+    }
+    
+    // --- BAKED LIGHTING (Proceduralne) ---
+    vec3 finalColor = baseColor * 0.7;
+    
+    float heightFactor = clamp(vWorldPos.y * 0.2, 0.0, 0.4);
+    finalColor += baseColor * heightFactor;
+    
+    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+    float diff = max(dot(normalize(vNormal), lightDir), 0.0);
+    finalColor += baseColor * diff * 0.2;
+    
+    float edgeShadow = 1.0;
+    if (vChecker < 0.5) {
+        edgeShadow = clamp(vWorldPos.y / 1.5, 0.3, 1.0);
+    }
+    finalColor *= edgeShadow;
+
+    FragColor = vec4(finalColor, 1.0);
+}
+)";
+
+static const char* UI_VS = R"(
+#version 330 core
+layout(location=0) in vec2 aPos;
+out vec2 vUV;
+uniform vec2 uCenter;
+uniform vec2 uHalfSize;
+uniform float uMode;
+uniform float uArrowCos;
+uniform float uArrowSin;
+const vec2 QUAD[6]  = vec2[](vec2(-1,-1), vec2(1,-1), vec2(1,1), vec2(-1,-1), vec2(1,1), vec2(-1,1));
+const vec2 ARROW[3] = vec2[](vec2(0.0,-0.14), vec2(-0.09,0.10), vec2(0.09,0.10));
+void main() {
+    vec2 c;
+    if (uMode < 0.5) {
+        c = QUAD[gl_VertexID]; // Minimapa
+    } else if (uMode < 1.5) {
+        vec2 a = ARROW[gl_VertexID]; // Strzałka
+        c = vec2(uArrowCos * a.x + uArrowSin * a.y, -uArrowSin * a.x + uArrowCos * a.y);
+    } else {
+        c = QUAD[gl_VertexID]; // Celownik (Crosshair)
+    }
+    vUV = c * 0.5;
+    
+    // Dla celownika (uMode == 2.0) używamy stałej pozycji (0,0) i małego rozmiaru
+    if (uMode > 1.5) {
+        gl_Position = vec4(c * 0.015, 0.0, 1.0); // Rysujemy na środku ekranu
+    } else {
+        gl_Position = vec4(uCenter.x + c.x * uHalfSize.x, uCenter.y - c.y * uHalfSize.y, 0.0, 1.0);
+    }
+}
+)";
+
+static const char* UI_FS = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uMap;
+uniform float uMode;
+uniform vec2 uPlayerXZ;
+uniform float uMapCos;
+uniform float uMapSin;
+uniform float uWorldRadius;
+uniform vec2 uMapOrigin;
+uniform float uMapWorldSize;
+void main() {
+    if (uMode > 1.5) {
+        // Celownik: rysujemy biały krzyżyk z przezroczystym środkiem
+        float dist = length(vUV);
+        if (dist < 0.1) discard; // Pusty środek
+        if (abs(vUV.x) < 0.1 || abs(vUV.y) < 0.1) {
+            FragColor = vec4(1.0, 1.0, 1.0, 0.8); // Białe linie
+        } else {
+            discard;
+        }
+        return;
+    }
+    
+    // ... (reszta kodu dla minimapy i strzałki bez zmian)
+    if (length(vUV) > 0.5) discard;
+    if (uMode > 0.5) { FragColor = vec4(1.0, 0.85, 0.1, 1.0); return; }
+    vec2 l = vUV * 2.0 * uWorldRadius;
+    vec2 w = uPlayerXZ + vec2(uMapCos * l.x + uMapSin * l.y, -uMapSin * l.x + uMapCos * l.y);
+    vec2 t = (w - uMapOrigin) / uMapWorldSize;
+    vec4 tex = texture(uMap, clamp(t, 0.0, 1.0));
+    float inside = (all(greaterThanEqual(t, vec2(0.0))) && all(lessThanEqual(t, vec2(1.0)))) ? tex.a : 0.0;
+    vec3 col = mix(vec3(0.04, 0.05, 0.07), tex.rgb, inside);
+    col = mix(col, vec3(0.9), smoothstep(0.455, 0.47, length(vUV)));
+    FragColor = vec4(col, 0.85);
+}
+)";
+
+static const char* GUN_VS = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in vec2 aUV;
+
+uniform mat4 uProj;
+uniform mat4 uView;      
+uniform vec3 uGunOffset; 
+uniform mat4 uGunRot;    
+
+out vec3 vNormal;
+out vec2 vUV;
+
+void main() {
+    vec4 localPos = uGunRot * vec4(aPos * 0.001, 1.0);
+    vec4 viewPos = localPos + vec4(uGunOffset, 0.0);
+    gl_Position = uProj * viewPos;
+    vNormal = mat3(uView) * mat3(uGunRot) * aNrm;
+    vUV = aUV;
+}
+)";
+
+static const char* GUN_FS = R"(
+#version 330 core
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTex;
+uniform float uFlash; 
+
+void main() {
+    vec3 texColor = texture(uTex, vUV).rgb;
+    FragColor = vec4(texColor * (0.8 + uFlash * 2.0), 1.0);
+}
+)";
+
+static const char* MUZZLE_VS = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+out vec2 vUV;
+uniform mat4 uProj;
+uniform vec3 uOffset;
+uniform float uScale;
+
+void main() {
+    // aPos to wierzchołki trójkąta (-1,-1), (1,-1), (0,1)
+    // Przekazujemy je jako UV (zakres -1 do 1)
+    vUV = aPos.xy; 
+    
+    // Przesuwamy i skalujemy wierzchołki
+    vec3 worldPos = uOffset + aPos * uScale;
+    gl_Position = uProj * vec4(worldPos, 1.0);
+}
+)";
+
+static const char* MUZZLE_FS = R"(
+#version 330 core
+in vec2 vUV; // Przekazujemy UV z wierzchołka, żeby wiedzieć, gdzie jesteśmy w trójkącie
+out vec4 FragColor;
+
+void main() {
+    // vUV będzie w zakresie od -1 do 1 dla trójkąta (dzięki vertex shaderowi)
+    // Liczymy odległość od środka (0,0)
+    float dist = length(vUV);
+    
+    // Tworzymy bloom: im bliżej środka, tym jaśniej
+    float intensity = exp(-dist * 4.0); // Funkcja wykładnicza daje miękkie przejście
+    
+    // Kolor: od białego w środku do pomarańczowego na brzegach
+    vec3 color = mix(vec3(1.0, 0.4, 0.1), vec3(1.0, 1.0, 0.8), intensity);
+    
+    // Alfa zależy od intensywności (żeby brzegi były przezroczyste)
+    FragColor = vec4(color * intensity, intensity);
+}
+)";
+
+static const char* MENU_VS = R"(
+#version 330 core
+layout(location=0) in vec2 aPos;
+uniform vec2 uCenter;
+uniform vec2 uHalfSize;
+out vec2 vUV;
+void main() {
+    vUV = aPos * 0.5 + 0.5;
+    gl_Position = vec4(uCenter + aPos * uHalfSize, 0.0, 1.0);
+}
+)";
+
+static const char* MENU_FS = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTexture;
+uniform vec4 uColor;
+uniform float uUseTex;
+void main() {
+    if (uUseTex > 0.5) {
+        // Odwrócenie osi Y — stbi ładuje od góry, OpenGL oczekuje od dołu
+        vec2 uv = vec2(vUV.x, 1.0 - vUV.y);
+        FragColor = texture(uTexture, uv);
+    } else {
+        FragColor = uColor;
+    }
+}
+)";
+
+OpenGLEngine::OpenGLEngine(const std::string& title, uint32_t w, uint32_t h, std::filesystem::path shaderDir)
+    : shaderDir_(std::move(shaderDir)) {
+    if (!glfwInit()) throw std::runtime_error("glfwInit failed");
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    window_ = glfwCreateWindow(int(w), int(h), title.c_str(), nullptr, nullptr);
+    if (!window_) throw std::runtime_error("glfwCreateWindow failed");
+    glfwMakeContextCurrent(window_);
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) throw std::runtime_error("glad load failed");
+    glfwSwapInterval(1);
+    setupGL();
+
+    // --- INICJALIZACJA AUDIO (krok 4) ---
+    if (ma_engine_init(NULL, &audioEngine_) == MA_SUCCESS) {
+        audioInitialized_ = true;
+        // Próbujemy wczytać dźwięk strzału (jeśli istnieje)
+        std::string soundPath = (std::filesystem::absolute(std::filesystem::path(title)).parent_path() / "content" / "sounds" / "shot.wav").string();
+        // Uwaga: title to nazwa okna, a nie ścieżka. Lepiej użyć shaderDir_!
+        
+        std::string soundPathCorrect = (shaderDir_.parent_path() / "content" / "sounds" / "shot.wav").string();
+        
+        if (ma_sound_init_from_file(&audioEngine_, soundPathCorrect.c_str(), 0, NULL, NULL, &shotSound_) != MA_SUCCESS) {
+            std::cerr << "Nie można wczytać dźwięku: " << soundPathCorrect << "\n";
+        }
+    }
+    // -------------------------------------
+}
+
+OpenGLEngine::~OpenGLEngine() {
+    if (bgTex_) glDeleteTextures(1, &bgTex_);
+    if (mapTex_) glDeleteTextures(1, &mapTex_);
+    if (floorTex_) glDeleteTextures(1, &floorTex_);
+    if (wallTex_) glDeleteTextures(1, &wallTex_);
+    if (window_) glfwDestroyWindow(window_);
+    if (audioInitialized_) {
+        ma_sound_uninit(&shotSound_);
+        ma_engine_uninit(&audioEngine_);
+    }
+    glfwTerminate();
+}
+
+void OpenGLEngine::setupGL() {
+    skyboxShader_ = makeShader(SKYBOX_VS, SKYBOX_FS);
+    sceneShader_  = makeShader(SCENE_VS, SCENE_FS);
+    uiShader_     = makeShader(UI_VS, UI_FS);
+    gunShader_    = makeShader(GUN_VS, GUN_FS);
+    muzzleShader_ = makeShader(MUZZLE_VS, MUZZLE_FS);
+    menuShader_ = makeShader(MENU_VS, MENU_FS);
+
+    GLuint tmpVbo = 0;
+    makeQuadVAO(skyboxVAO_, tmpVbo);
+    makeQuadVAO(quadVAO_, tmpVbo);
+    makeCubeVAO(cubeVAO_, tmpVbo);
+
+    // --- NOWY BLOK DLA MUZZLE FLASH ---
+    GLuint muzzleVbo = 0; // NOWA ZMIENNA! (nie nadpisujemy tmpVbo)
+    glGenVertexArrays(1, &muzzleVAO_);
+    glGenBuffers(1, &muzzleVbo);
+    glBindVertexArray(muzzleVAO_);
+    glBindBuffer(GL_ARRAY_BUFFER, muzzleVbo);
+    
+    // Używamy QUADA (6 wierzchołków) zamiast trójkąta, żeby bloom był okrągły
+    float muzzleVerts[] = {
+        -1.0f, -1.0f, 0.0f, 
+         1.0f, -1.0f, 0.0f, 
+         1.0f,  1.0f, 0.0f, 
+        -1.0f, -1.0f, 0.0f, 
+         1.0f,  1.0f, 0.0f, 
+        -1.0f,  1.0f, 0.0f
+    };
+    glBufferData(GL_ARRAY_BUFFER, sizeof(muzzleVerts), muzzleVerts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glBindVertexArray(0);
+    
+}
+
+void OpenGLEngine::setSceneAssets(const Image& bg, const Image& map, const Image& floorTex, const Image& wallTex) {
+    if (bgTex_) glDeleteTextures(1, &bgTex_);
+    if (mapTex_) glDeleteTextures(1, &mapTex_);
+    if (floorTex_) glDeleteTextures(1, &floorTex_);
+    if (wallTex_) glDeleteTextures(1, &wallTex_);
+    
+    bgTex_ = makeTexture(bg);
+    mapTex_ = makeTexture(map);
+    floorTex_ = floorTex.rgba.empty() ? 0 : makeTexture(floorTex);
+    wallTex_ = wallTex.rgba.empty() ? 0 : makeTexture(wallTex);
+}
+
+void OpenGLEngine::drawFrame(const Scene& scene, const glm::vec3& playerPos,
+                             float playerYaw, const Minimap& minimap,
+                             const Camera& camera, bool isShooting,
+                             const std::vector<Enemy>& enemies) {
+    int w, h;
+    glfwGetFramebufferSize(window_, &w, &h);
+    if (w == 0 || h == 0) { glfwWaitEvents(); return; }
+    glViewport(0, 0, w, h);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    drawSkybox(camera, w, h);
+    drawScene(scene, camera, playerPos);
+
+    // --- RYSOWANIE WROGÓW (tuż po świecie 3D, przed bronią i UI) ---
+    glEnable(GL_DEPTH_TEST);
+    for (const auto& enemy : enemies) {
+        enemy.draw(*this, camera);
+    }
+
+    drawGun(camera, w, h, isShooting);
+    drawMinimap(scene, minimap, minimap.build(scene, playerPos, playerYaw, camera.yaw, w, h));
+    renderHealthbar(w, h);
+}
+
+void OpenGLEngine::drawSkybox(const Camera& camera, int w, int h) {
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glUseProgram(skyboxShader_);
+
+    const float aspect = float(w) / float(h);
+    glm::mat4 invVP = glm::inverse(camera.projection(aspect) * camera.view());
+    glUniformMatrix4fv(glGetUniformLocation(skyboxShader_, "uInvViewProj"), 1, GL_FALSE, glm::value_ptr(invVP));
+    glUniform3fv(glGetUniformLocation(skyboxShader_, "uCamPos"), 1, glm::value_ptr(camera.eyePosition()));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, bgTex_);
+    glUniform1i(glGetUniformLocation(skyboxShader_, "uBg"), 0);
+
+    glBindVertexArray(quadVAO_);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm::vec3& playerPos) {
+    glUseProgram(sceneShader_);
+    int w, h;
+    glfwGetFramebufferSize(window_, &w, &h);
+    const float aspect = float(w) / float(h);
+    const glm::mat4 vp = camera.projection(aspect) * camera.view();
+    glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uVP"), 1, GL_FALSE, glm::value_ptr(vp));
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, floorTex_);
+    glUniform1i(glGetUniformLocation(sceneShader_, "uFloorTex"), 0);
+    
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, wallTex_);
+    glUniform1i(glGetUniformLocation(sceneShader_, "uWallTex"), 1);
+
+    auto drawCube = [&](const glm::vec3& mn, const glm::vec3& mx, const glm::vec4& color) {
+        glm::vec3 center = (mn + mx) * 0.5f;
+        glm::vec3 scale = (mx - mn);
+
+        glUniform3fv(glGetUniformLocation(sceneShader_, "uOffset"), 1, glm::value_ptr(center));
+        glUniform3fv(glGetUniformLocation(sceneShader_, "uScale"), 1, glm::value_ptr(scale));
+        glUniform4fv(glGetUniformLocation(sceneShader_, "uColor"),  1, glm::value_ptr(color));
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+    };
+
+    glBindVertexArray(cubeVAO_);
+    
+    for (const Aabb& f : scene.floors) {
+        drawCube({f.min.x, f.min.y - 0.02f, f.min.z},
+                 {f.max.x, f.min.y,        f.max.z},
+                 {0.3f, 0.3f, 0.3f, 1.0f});
+    }
+    
+    if (scene.floors.empty()) {
+        drawCube({scene.bounds.min.x, scene.bounds.min.y - 0.02f, scene.bounds.min.z},
+                 {scene.bounds.max.x, scene.bounds.min.y,        scene.bounds.max.z},
+                 {0.3f, 0.3f, 0.3f, 1.0f});
+    }
+             
+    for (const Aabb& w : scene.walls)
+        drawCube(w.min, w.max, {0.72f, 0.28f, 0.22f, 0.0f});
+        
+    if (!camera.firstPerson) {
+        drawCube({playerPos.x - 0.25f, playerPos.y,        playerPos.z - 0.25f},
+                 {playerPos.x + 0.25f, playerPos.y + 1.8f, playerPos.z + 0.25f},
+                 {0.95f, 0.50f, 0.15f, 0.0f});
+    }
+    glBindVertexArray(0);
+}
+
+void OpenGLEngine::drawGun(const Camera& camera, int w, int h, bool isShooting) {
+    // 1. Czyścimy bufor głębi, żeby broń zawsze była na wierzchu
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glUseProgram(gunShader_);
+
+    const float dt = 0.016f; // Przybliżony delta time
+
+    // 2. Logika strzelania (Fire Rate - "piu piu piu")
+    if (isShooting && fireCooldown_ <= 0.0f) {
+        shotPulse_ = 1.0f;        
+        fireCooldown_ = 0.1f;     // 10 strzałów na sekundę
+        ma_sound_seek_to_pcm_frame(&shotSound_, 0); // Przewiń na początek
+        ma_sound_start(&shotSound_);                // Odtwórz
+    }
+    if (fireCooldown_ > 0.0f) fireCooldown_ -= dt;
+    
+    // Wygaszanie impulsu (błysku)
+    if (shotPulse_ > 0.0f) {
+        shotPulse_ -= dt * 10.0f; 
+        if (shotPulse_ < 0.0f) shotPulse_ = 0.0f;
+    }
+
+    // 3. Płynny recoil (Smooth Recoil)
+    float targetRecoil = shotPulse_ > 0.5f ? 1.0f : 0.0f; 
+    float speed = targetRecoil > currentRecoil_ ? 30.0f : 15.0f; 
+    currentRecoil_ += (targetRecoil - currentRecoil_) * speed * dt;
+
+    float recoilZ = currentRecoil_ * 0.08f; 
+    float recoilY = currentRecoil_ * 0.03f;
+    
+    // Błysk (jasność broni) - tylko gdy strzelamy
+    float flash = shotPulse_ > 0.0f ? 0.5f : 0.0f; 
+
+    // 4. Macierze
+    const float aspect = float(w) / float(h);
+    glm::mat4 proj = camera.projection(aspect);
+    glm::mat4 view = glm::mat4(glm::mat3(camera.view()));
+
+    glUniformMatrix4fv(glGetUniformLocation(gunShader_, "uProj"), 1, GL_FALSE, glm::value_ptr(proj));
+    glUniformMatrix4fv(glGetUniformLocation(gunShader_, "uView"), 1, GL_FALSE, glm::value_ptr(view));
+
+    // Przesunięcie i obrót broni
+    glUniform3f(glGetUniformLocation(gunShader_, "uGunOffset"), 0.25f, -0.25f + recoilY, -0.5f + recoilZ); 
+    glm::mat4 gunRot = glm::rotate(glm::mat4(1.0f), glm::radians(180.f), glm::vec3(0.f, 1.f, 0.f)); 
+    gunRot = glm::rotate(gunRot, glm::radians(currentRecoil_ * 3.0f), glm::vec3(1.f, 0.f, 0.f));
+    glUniformMatrix4fv(glGetUniformLocation(gunShader_, "uGunRot"), 1, GL_FALSE, glm::value_ptr(gunRot));
+    
+    // Efekt rozjaśnienia broni
+    glUniform1f(glGetUniformLocation(gunShader_, "uFlash"), flash);
+
+    // 5. Rysowanie modelu broni
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gunTexture_);
+    glUniform1i(glGetUniformLocation(gunShader_, "uTex"), 0);
+
+    glBindVertexArray(gunModel_.vao);
+    glDrawElements(GL_TRIANGLES, gunModel_.indexCount, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+
+    // 6. Rysowanie Muzzle Flash (Bloom)
+    if (shotPulse_ > 0.0f) {
+        glUseProgram(muzzleShader_);
+        
+        // Włączamy blending dla poświaty (efekt świecenia)
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE); // Additive blending
+        
+        // Pozycja błysku (przy lufie)
+        glm::vec3 muzzleOffset = glm::vec3(0.25f, -0.15f + recoilY, -0.8f + recoilZ);
+        glUniform3fv(glGetUniformLocation(muzzleShader_, "uOffset"), 1, glm::value_ptr(muzzleOffset));
+        
+        // Skalowanie błysku (rośnie i maleje)
+        float flashScale = 0.03f + (shotPulse_ * 0.04f); 
+        glUniform1f(glGetUniformLocation(muzzleShader_, "uScale"), flashScale);
+        glUniformMatrix4fv(glGetUniformLocation(muzzleShader_, "uProj"), 1, GL_FALSE, glm::value_ptr(proj));
+
+        glBindVertexArray(muzzleVAO_);
+        glDisable(GL_CULL_FACE);
+        
+        // Rysujemy QUAD (6 wierzchołków)!
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        
+        glDisable(GL_BLEND); // Wyłączamy blending po narysowaniu
+        glBindVertexArray(0);
+    }
+}
+
+void OpenGLEngine::setGunAssets(const std::string& objPath, const Image& texImage) {
+    gunModel_ = Model();
+    if (!gunModel_.load(objPath)) {
+        std::cerr << "Failed to load gun model: " << objPath << '\n';
+    }
+    if (gunTexture_) glDeleteTextures(1, &gunTexture_);
+    gunTexture_ = makeTexture(texImage);
+}
+
+void OpenGLEngine::drawMinimap(const Scene&, const Minimap&, const UiPush& radar) {
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    
+    // Aktywujemy jawnie jednostkę tekstury 0 przed użyciem UI
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, mapTex_);
+
+    glUseProgram(uiShader_);
+
+    // --- RYSOWANIE MINIMAPY ---
+    glUniform2fv(glGetUniformLocation(uiShader_, "uCenter"), 1, glm::value_ptr(radar.center));
+    glUniform2fv(glGetUniformLocation(uiShader_, "uHalfSize"), 1, glm::value_ptr(radar.halfSize));
+    glUniform1f(glGetUniformLocation(uiShader_, "uArrowCos"), radar.arrowCos);
+    glUniform1f(glGetUniformLocation(uiShader_, "uArrowSin"), radar.arrowSin);
+    glUniform2fv(glGetUniformLocation(uiShader_, "uPlayerXZ"), 1, glm::value_ptr(radar.playerXZ));
+    glUniform1f(glGetUniformLocation(uiShader_, "uMapCos"), radar.mapCos);
+    glUniform1f(glGetUniformLocation(uiShader_, "uMapSin"), radar.mapSin);
+    glUniform1f(glGetUniformLocation(uiShader_, "uWorldRadius"), radar.worldRadius);
+    glUniform2fv(glGetUniformLocation(uiShader_, "uMapOrigin"), 1, glm::value_ptr(radar.mapOrigin));
+    glUniform1f(glGetUniformLocation(uiShader_, "uMapWorldSize"), radar.mapWorldSize);
+    glUniform1i(glGetUniformLocation(uiShader_, "uMap"), 0);
+
+    // Tło minimapy (uMode = 0)
+    glUniform1f(glGetUniformLocation(uiShader_, "uMode"), 0.0f);
+    glBindVertexArray(quadVAO_);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    // Strzałka gracza (uMode = 1)
+    glUniform1f(glGetUniformLocation(uiShader_, "uMode"), 1.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 6); 
+
+    // --- RYSOWANIE CELOWNIKA (CROSSHAIR) ---
+    glUniform1f(glGetUniformLocation(uiShader_, "uMode"), 2.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 6); 
+
+    glBindVertexArray(0);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void OpenGLEngine::renderHealthbar(int w, int h) {
+    if (w <= 0 || h <= 0) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(menuShader_);
+    glBindVertexArray(quadVAO_);
+
+    // --- USTAWIENIA GEOMETRII (Miks Quake/Portal) ---
+    // Lewy dolny róg, ale z lekkim marginesem
+    const float marginX = 0.04f; 
+    const float marginY = 0.06f;
+    
+    // Pozycja w NDC (lewy dolny róg to -1, -1)
+    const float barCenterY = -1.0f + marginY;
+    const float barHalfH   = 0.015f; // Cienki, minimalistyczny pasek
+    
+    // Szerokość paska
+    const float barHalfW   = 0.35f;
+    const float barCenterX = -1.0f + marginX + barHalfW;
+
+    // Kolor zależny od zdrowia (Zielony -> Żółty -> Czerwony)
+    float healthNorm = glm::clamp(health / 100.0f, 0.0f, 1.0f);
+    glm::vec4 healthColor;
+    if (healthNorm > 0.5f) {
+        // Zielony do żółtego
+        float t = (healthNorm - 0.5f) * 2.0f;
+        healthColor = glm::vec4(1.0f - t, 0.8f + t * 0.2f, 0.0f, 0.9f);
+    } else {
+        // Żółty do czerwonego
+        float t = healthNorm * 2.0f;
+        healthColor = glm::vec4(1.0f, t * 0.8f, 0.0f, 0.9f);
+    }
+
+    // 1. Tło paska (ciemne, przezroczyste, jak w Portalu)
+    glUniform1f(glGetUniformLocation(menuShader_, "uUseTex"), 0.0f);
+    glUniform2f(glGetUniformLocation(menuShader_, "uCenter"), barCenterX, barCenterY);
+    glUniform2f(glGetUniformLocation(menuShader_, "uHalfSize"), barHalfW, barHalfH);
+    glUniform4f(glGetUniformLocation(menuShader_, "uColor"), 0.05f, 0.05f, 0.05f, 0.6f);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    // 2. Wypełnienie paska (kolorowe)
+    if (healthNorm > 0.001f) {
+        float fillHalfW = barHalfW * healthNorm;
+        float fillCenterX = -1.0f + marginX + fillHalfW;
+        
+        glUniform2f(glGetUniformLocation(menuShader_, "uCenter"), fillCenterX, barCenterY);
+        glUniform2f(glGetUniformLocation(menuShader_, "uHalfSize"), fillHalfW, barHalfH * 0.7f); // Trochę węższy od tła
+        glUniform4fv(glGetUniformLocation(menuShader_, "uColor"), 1, glm::value_ptr(healthColor));
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    // 3. Cyfry (opcjonalnie, ale dodają klimatu Quake'a)
+    // Na razie pomijamy, bo nie mamy renderowania tekstu.
+
+    glBindVertexArray(0);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void OpenGLEngine::drawEnemyCube(const glm::vec3& min, const glm::vec3& max, const glm::vec4& color, const Camera& camera) {
+    glUseProgram(sceneShader_);
+    int w, h;
+    glfwGetFramebufferSize(window_, &w, &h);
+    const float aspect = float(w) / float(h);
+    const glm::mat4 vp = camera.projection(aspect) * camera.view();
+    glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uVP"), 1, GL_FALSE, glm::value_ptr(vp));
+
+    glm::vec3 center = (min + max) * 0.5f;
+    glm::vec3 scale = (max - min);
+    glUniform3fv(glGetUniformLocation(sceneShader_, "uOffset"), 1, glm::value_ptr(center));
+    glUniform3fv(glGetUniformLocation(sceneShader_, "uScale"), 1, glm::value_ptr(scale));
+    glUniform4fv(glGetUniformLocation(sceneShader_, "uColor"), 1, glm::value_ptr(color));
+
+    glBindVertexArray(cubeVAO_);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+}
+
+void OpenGLEngine::drawMenu() {
+    int w = 0, h = 0;
+    glfwGetFramebufferSize(window_, &w, &h);
+    if (w <= 0 || h <= 0) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(menuShader_);
+
+    // Proporcje względem okna GLFW (NDC); halfSize.x korygowany pod aspect,
+    // żeby przyciski wyglądały tak samo na laptopie i szerokim monitorze.
+    const float aspect = float(w) / float(h);
+    const float refAspect = 16.0f / 9.0f;
+    const float xScale = refAspect / aspect;
+
+    // Rysowanie tła (pełny ekran w NDC)
+    if (menuBgTex_) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, menuBgTex_);
+        glUniform1i(glGetUniformLocation(menuShader_, "uTexture"), 0);
+        glUniform1f(glGetUniformLocation(menuShader_, "uUseTex"), 1.0f);
+        glUniform2f(glGetUniformLocation(menuShader_, "uCenter"), 0.0f, 0.0f);
+        glUniform2f(glGetUniformLocation(menuShader_, "uHalfSize"), 1.0f, 1.0f);
+        glBindVertexArray(quadVAO_);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    } else {
+        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
+    for (const auto& btn : menuButtons_) {
+        if (btn.textureID != 0) {
+            // Rysowanie z teksturą
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, btn.textureID);
+            glUniform1i(glGetUniformLocation(menuShader_, "uTexture"), 0);
+            glUniform1f(glGetUniformLocation(menuShader_, "uUseTex"), 1.0f);
+        } else {
+            // Rysowanie z kolorem
+            glUniform1f(glGetUniformLocation(menuShader_, "uUseTex"), 0.0f);
+            glUniform4fv(glGetUniformLocation(menuShader_, "uColor"), 1, glm::value_ptr(btn.color));
+        }
+        
+        // Ustawiamy pozycję i rozmiar
+        glUniform2f(glGetUniformLocation(menuShader_, "uCenter"), btn.center.x * xScale, btn.center.y);
+        glUniform2f(glGetUniformLocation(menuShader_, "uHalfSize"), btn.halfSize.x * xScale, btn.halfSize.y);
+        
+        glBindVertexArray(quadVAO_);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    glBindVertexArray(0);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void OpenGLEngine::loadMenu(const std::string& path) {
+    menuButtons_.clear();
+    std::ifstream file(path);
+    if (!file) return;
+    
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream ss(line);
+        std::string type;
+        ss >> type;
+
+        if (type == "background") {
+            std::string texPath;
+            ss >> texPath;
+            std::filesystem::path p(path);
+            std::string fullPath = (p.parent_path() / texPath).string();
+            Image bg = loadImageRGBA(fullPath);
+            if (!bg.rgba.empty()) {
+                if (menuBgTex_) glDeleteTextures(1, &menuBgTex_);
+                menuBgTex_ = makeTexture(bg);
+            }
+        } else if (type == "button") {
+            MenuButton btn;
+            std::string quotedText;
+            ss >> quotedText;
+            
+            if (!quotedText.empty() && quotedText.front() == '"') {
+                while (quotedText.back() != '"' && !ss.eof()) {
+                    std::string part;
+                    ss >> part;
+                    quotedText += " " + part;
+                }
+                btn.text = quotedText.substr(1, quotedText.length() - (quotedText.length() > 1 ? 2 : 1));
+            } else {
+                btn.text = quotedText;
+            }
+
+            // Wczytujemy współrzędne
+            ss >> btn.center.x >> btn.center.y >> btn.halfSize.x >> btn.halfSize.y;
+
+            // TERAZ deklarujemy i wczytujemy resztę linii
+            std::string rest;
+            std::getline(ss, rest);
+
+            // Teraz parsujemy akcję
+            if (rest.find("action:new_game") != std::string::npos) btn.action = "new_game";
+            else if (rest.find("action:quit") != std::string::npos) btn.action = "quit";
+
+            // Teraz parsujemy kolor
+            if (rest.find("color:") != std::string::npos) {
+                size_t cpos = rest.find("color:") + 6;
+                std::istringstream css(rest.substr(cpos));
+                css >> btn.color.r >> btn.color.g >> btn.color.b >> btn.color.a;
+            } else {
+                btn.color = glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
+            }
+
+            // TERAZ parsujemy teksturę (kolejność nie ma znaczenia, byle po deklaracji rest)
+            if (rest.find("texture:") != std::string::npos) {
+                size_t tpos = rest.find("texture:") + 8;
+                std::string texPath = rest.substr(tpos);
+                while (!texPath.empty() && (texPath.back() == ' ' || texPath.back() == '\r')) texPath.pop_back();
+                
+                std::filesystem::path p(path);
+                std::string fullPath = (p.parent_path() / texPath).string();
+                Image texImg = loadImageRGBA(fullPath);
+                if (!texImg.rgba.empty()) {
+                    btn.textureID = makeTexture(texImg);
+                }
+            }
+
+            menuButtons_.push_back(btn);
+        }
+    }
+}
+
+bool OpenGLEngine::shouldClose() const {
+    return glfwWindowShouldClose(window_);
+}

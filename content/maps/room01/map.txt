@@ -1,0 +1,17 @@
+background    bg.png          # ścieżka względna do katalogu mapy (render z Blendera)
+floor_tex     floor.png
+wall_tex      wall.png
+coords        engine          # engine | blender; blender: (x,y,z) -> (x,z,-y); dotyczy dyrektyw PONIŻEJ
+camera_pos    0 3.2 7.5
+camera_look   0 1.0 0         # = camera_pos + kierunek patrzenia kamery z Blendera (oś -Z kamery)
+camera_fov    50              # poziomy FOV [deg] (Blender: render poziomy, sensor fit Auto)
+player_start 0 0 2
+bounds -18 -1 -11 18 3 11
+floor -16 -1 -9 17 -0.9 9
+wall -1 0 -1 1 2 1
+wall 3 0 -4 4 2 0
+wall 4 0 -4 15 3 -3
+wall -17 0 -9 -16 3 10
+wall -16 0 9 17 3 10
+wall 16 0 -9 17 3 10
+wall -17 0 -10 17 3 -9

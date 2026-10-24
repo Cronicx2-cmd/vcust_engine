@@ -1,0 +1,5 @@
+background menu_bg.png
+
+# Przyciski po lewej stronie (styl HL2)
+button "NEW GAME" -0.85  -0.5  0.1  0.1  action:new_game  texture:new_game_btn.png
+button "QUIT"     -0.85  -0.6  0.1  0.1  action:quit      texture:quit_btn.png
