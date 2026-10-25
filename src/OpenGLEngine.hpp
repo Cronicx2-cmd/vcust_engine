@@ -5,6 +5,7 @@
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include "external/miniaudio.h"
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include "Scene.hpp"
@@ -42,7 +43,7 @@ public:
 
     void drawFrame(const Scene& scene, const glm::vec3& playerPos, float playerYaw,
                    const Minimap& minimap, const Camera& camera, bool isShooting,
-                   const std::vector<Enemy>& enemies);
+                   const std::vector<Enemy>& enemies);  
 
     const std::vector<MenuButton>& getMenuButtons() const { return menuButtons_; }
 
@@ -76,6 +77,11 @@ private:
     uint32_t menuShader_{0};
     
     uint32_t skyboxVAO_{0}, cubeVAO_{0}, quadVAO_{0};
+    uint32_t brushVAO_{0}, brushVBO_{0};
+    std::uint64_t brushMeshRevision_{0};
+
+    // Bufory wierzchołków
+    uint32_t skyboxVBO_{0}, cubeVBO_{0}, quadVBO_{0}, muzzleVBO_{0};
     uint32_t bgTex_{0}, mapTex_{0}, floorTex_{0}, wallTex_{0};
     
     Model gunModel_;
@@ -84,4 +90,7 @@ private:
     ma_engine audioEngine_;
     ma_sound shotSound_;
     bool audioInitialized_ = false;
+    bool shotSoundInitialized_ = false;
+
+    double lastFrameTime_{0.0};
 };
