@@ -185,26 +185,32 @@ static const char* SCENE_VS = R"(
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
 layout(location=2) in vec2 aUV;
+layout(location=3) in float aMaterial;
 
 uniform mat4 uVP;
 uniform vec3 uOffset;
 uniform vec3 uScale;
 uniform vec4 uColor;
+uniform float uUseVertexMaterial;
 
 out vec3 vColor;
 out vec3 vWorldPos;
 out vec3 vNormal;
 out vec2 vUV;
 out float vChecker;
+out float vMaterial;
 
 void main() {
     vec3 world = uOffset + aPos * uScale;
     vWorldPos = world;
     vNormal = aNrm;
-    vChecker = uColor.a;
+    vMaterial = uUseVertexMaterial > 0.5 ? aMaterial : (uColor.a > 0.5 ? 1.0 : 0.0);
+    vChecker = vMaterial;
     vColor = uColor.rgb;
     
-    if (abs(vNormal.y) > 0.5) {
+    if (uUseVertexMaterial > 0.5) {
+        vUV = aUV;
+    } else if (abs(vNormal.y) > 0.5) {
         vUV = world.xz * 0.25;
     } else {
         if (abs(vNormal.x) > 0.5) vUV = world.zy * 0.25;
@@ -218,68 +224,56 @@ void main() {
 
 static const char* SCENE_FS = R"(
 #version 330 core
-
 in vec3 vColor;
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
 in float vChecker;
-
+in float vMaterial;
 out vec4 FragColor;
 
 uniform sampler2D uFloorTex;
 uniform sampler2D uWallTex;
 
 void main() {
-    bool isFloor = vChecker > 0.5;
+    bool isFloor = vMaterial > 0.5 && vMaterial < 1.5;
+    vec3 baseColor = isFloor ? texture(uFloorTex, vUV).rgb
+                             : texture(uWallTex, vUV).rgb;
 
-    vec3 texColor = isFloor
-        ? texture(uFloorTex, vUV).rgb
-        : texture(uWallTex, vUV).rgb;
-
-    // Odrzucamy pomarańczowe przebarwienia tekstury ścian,
-    // ale zachowujemy szczegóły materiału.
     if (!isFloor) {
-        float orange = smoothstep(
-            texColor.b * 1.15 + 0.04,
-            texColor.b * 1.55 + 0.12,
-            texColor.r
-        );
-
-        texColor = mix(
-            texColor,
-            vec3(dot(texColor, vec3(0.299, 0.587, 0.114))),
-            orange
-        );
+        // Keep the existing desaturation of the wall texture, without
+        // affecting floor material or the material ID itself.
+        if (baseColor.r > baseColor.b * 1.3 && baseColor.r > 0.25) {
+            baseColor *= 0.05;
+        } else {
+            float gray = dot(baseColor, vec3(0.299, 0.587, 0.114));
+            baseColor = vec3(gray);
+        }
     }
 
-    // Zabezpieczenie przed pustymi lub prawie czarnymi teksturami.
-    if (dot(texColor, vec3(0.333)) < 0.025) {
-        texColor = isFloor
-            ? vec3(0.32, 0.34, 0.36)
-            : vec3(0.12, 0.14, 0.16);
+    // Additional brush materials can reuse the current wall texture while
+    // receiving distinct surface tints. New texture slots can be added later.
+    if (vMaterial > 1.5 && vMaterial < 2.5) {
+        baseColor *= vec3(0.72, 0.80, 0.90); // metal
+    } else if (vMaterial >= 2.5) {
+        baseColor = mix(baseColor, vec3(0.82, 0.86, 0.90), 0.38); // light panel
     }
 
-    vec3 N = normalize(vNormal);
-    vec3 L = normalize(vec3(-0.4, 0.85, 0.3));
+    if (length(baseColor) < 0.05) {
+        baseColor = isFloor ? vec3(0.4, 0.4, 0.4) : vec3(0.05, 0.05, 0.05);
+    }
 
-    float diffuse = max(dot(N, L), 0.0);
+    vec3 finalColor = baseColor * 0.7;
+    float heightFactor = clamp(vWorldPos.y * 0.2, 0.0, 0.4);
+    finalColor += baseColor * heightFactor;
+    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+    float diff = max(dot(normalize(vNormal), lightDir), 0.0);
+    finalColor += baseColor * diff * 0.2;
 
-    // Łagodne oświetlenie, zamiast jednolitego koloru kostek.
-    float ambient = isFloor ? 0.42 : 0.32;
-    float lighting = ambient + diffuse * 0.48;
-
-    // Delikatne przyciemnienie dolnych części ścian.
-    float heightShade = isFloor
-        ? 1.0
-        : mix(0.72, 1.0, smoothstep(-0.5, 2.0, vWorldPos.y));
-
-    vec3 color = texColor * lighting * heightShade;
-
-    // Subtelny chłodny odcień pasujący do Vcust Engine.
-    color *= vec3(0.94, 0.98, 1.02);
-
-    FragColor = vec4(color, 1.0);
+    float edgeShadow = 1.0;
+    if (!isFloor) edgeShadow = clamp(vWorldPos.y / 1.5, 0.3, 1.0);
+    finalColor *= edgeShadow;
+    FragColor = vec4(finalColor, 1.0);
 }
 )";
 
@@ -591,14 +585,14 @@ OpenGLEngine::~OpenGLEngine() {
         }
     }
 
-    const GLuint vertexArrays[] = {skyboxVAO_, cubeVAO_, quadVAO_, muzzleVAO_};
+    const GLuint vertexArrays[] = {skyboxVAO_, cubeVAO_, quadVAO_, muzzleVAO_, brushVAO_};
     for (const GLuint vertexArray : vertexArrays) {
         if (vertexArray != 0) {
             glDeleteVertexArrays(1, &vertexArray);
         }
     }
 
-    const GLuint buffers[] = {skyboxVBO_, cubeVBO_, quadVBO_, muzzleVBO_};
+    const GLuint buffers[] = {skyboxVBO_, cubeVBO_, quadVBO_, muzzleVBO_, brushVBO_};
     for (const GLuint buffer : buffers) {
         if (buffer != 0) {
             glDeleteBuffers(1, &buffer);
@@ -639,6 +633,23 @@ void OpenGLEngine::setupGL() {
     makeQuadVAO(skyboxVAO_, skyboxVBO_);
     makeQuadVAO(quadVAO_, quadVBO_);
     makeCubeVAO(cubeVAO_, cubeVBO_);
+
+    // Dynamic world mesh generated by SceneManager from convex brush planes.
+    glGenVertexArrays(1, &brushVAO_);
+    glGenBuffers(1, &brushVBO_);
+    glBindVertexArray(brushVAO_);
+    glBindBuffer(GL_ARRAY_BUFFER, brushVBO_);
+    glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SceneVertex), reinterpret_cast<void*>(offsetof(SceneVertex, position)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(SceneVertex), reinterpret_cast<void*>(offsetof(SceneVertex, normal)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(SceneVertex), reinterpret_cast<void*>(offsetof(SceneVertex, uv)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(SceneVertex), reinterpret_cast<void*>(offsetof(SceneVertex, material)));
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     // --- NOWY BLOK DLA MUZZLE FLASH ---
     glGenVertexArrays(1, &muzzleVAO_);
@@ -722,6 +733,7 @@ void OpenGLEngine::drawSkybox(const Camera& camera, int w, int h) {
 
 void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm::vec3& playerPos) {
     glUseProgram(sceneShader_);
+    glUniform1f(glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 0.0f);
     int w, h;
     glfwGetFramebufferSize(window_, &w, &h);
     const float aspect = float(w) / float(h);
@@ -754,7 +766,7 @@ void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm
                  {0.3f, 0.3f, 0.3f, 1.0f});
     }
     
-    if (scene.floors.empty()) {
+    if (scene.floors.empty() && !scene.hasBrushFloorSurface) {
         drawCube({scene.bounds.min.x, scene.bounds.min.y - 0.02f, scene.bounds.min.z},
                  {scene.bounds.max.x, scene.bounds.min.y,        scene.bounds.max.z},
                  {0.3f, 0.3f, 0.3f, 1.0f});
@@ -762,6 +774,24 @@ void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm
              
     for (const Aabb& w : scene.walls)
         drawCube(w.min, w.max, {0.72f, 0.28f, 0.22f, 0.0f});
+
+    if (!scene.brushVertices.empty()) {
+        if (brushMeshRevision_ != scene.brushMeshRevision) {
+            glBindBuffer(GL_ARRAY_BUFFER, brushVBO_);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(scene.brushVertices.size() * sizeof(SceneVertex)),
+                         scene.brushVertices.data(), GL_STATIC_DRAW);
+            brushMeshRevision_ = scene.brushMeshRevision;
+        }
+        glUniform1f(glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 1.0f);
+        glUniform3f(glGetUniformLocation(sceneShader_, "uOffset"), 0.0f, 0.0f, 0.0f);
+        glUniform3f(glGetUniformLocation(sceneShader_, "uScale"), 1.0f, 1.0f, 1.0f);
+        glUniform4f(glGetUniformLocation(sceneShader_, "uColor"), 1.0f, 1.0f, 1.0f, 0.0f);
+        glBindVertexArray(brushVAO_);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(scene.brushVertices.size()));
+        glBindVertexArray(cubeVAO_);
+        glUniform1f(glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 0.0f);
+    }
         
     if (!camera.firstPerson) {
         drawCube({playerPos.x - 0.25f, playerPos.y,        playerPos.z - 0.25f},
