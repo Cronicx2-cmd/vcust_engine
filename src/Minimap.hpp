@@ -41,13 +41,43 @@ public:
             if (w.x < lo.x || w.x > hi.x || w.y < lo.y || w.y > hi.y) continue;
             const glm::vec2 f = glm::fract(w);
             put(x, y, (f.x < line || f.y < line) ? Rgba{70, 110, 70, 255} : Rgba{40, 70, 40, 255});
-        }
-        for (const Aabb& b : s.walls) {
-            const int x0 = toPx(b.min.x, origin_.x), x1 = toPx(b.max.x, origin_.x);
-            const int y0 = toPx(b.min.z, origin_.y), y1 = toPx(b.max.z, origin_.y);
-            for (int y = y0; y <= y1; ++y) for (int x = x0; x <= x1; ++x) {
-                const bool edge = x == x0 || x == x1 || y == y0 || y == y1;
-                put(x, y, edge ? Rgba{230, 90, 60, 255} : Rgba{120, 40, 30, 255});
+        }   
+        
+        // Draw wall brushes as separate outlined rectangles.
+        for (const ConvexBrush& b : s.brushes) {
+            bool hasWallSurface = false;
+
+            for (const BrushPlane& plane : b.planes) {
+                if (plane.material != BrushMaterial::Floor) {
+                    hasWallSurface = true;
+                    break;
+                }
+            }
+
+            if (!hasWallSurface) continue;
+
+            const int x0 = toPx(b.min.x, origin_.x);
+            const int x1 = toPx(b.max.x, origin_.x);
+            const int y0 = toPx(b.min.z, origin_.y);
+            const int y1 = toPx(b.max.z, origin_.y);
+
+            const int left   = std::max(0, std::min(x0, x1));
+            const int right  = std::min(N - 1, std::max(x0, x1));
+            const int top    = std::max(0, std::min(y0, y1));
+            const int bottom = std::min(N - 1, std::max(y0, y1));
+
+            if (left > right || top > bottom) continue;
+
+            const Rgba wallColor{230, 90, 60, 255};
+
+            for (int x = left; x <= right; ++x) {
+                put(x, top, wallColor);
+                put(x, bottom, wallColor);
+            }
+
+            for (int y = top; y <= bottom; ++y) {
+                put(left, y, wallColor);
+                put(right, y, wallColor);
             }
         }
         return img;

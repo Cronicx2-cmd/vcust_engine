@@ -56,7 +56,18 @@ private:
     void drawScene(const Scene& scene, const Camera& camera, const glm::vec3& playerPos);
     void drawMinimap(const Scene& scene, const Minimap& minimap, const UiPush& radar);
     void renderHealthbar(int w, int h);
-    void drawGun(const Camera& camera, int w, int h, bool isShooting);
+    void drawGun(
+        const Camera& camera,
+        int w,
+        int h,
+        bool isShooting,
+        const Scene& scene,
+        const glm::vec3& playerPos
+    );
+
+    Image floorLightImage_{};
+    float floorAverageLuminance_{0.45f};
+    float gunWorldLight_{1.0f};
 
     std::vector<MenuButton> menuButtons_;
     uint32_t menuBgTex_{0};
@@ -91,6 +102,9 @@ private:
     ma_sound shotSound_;
     bool audioInitialized_ = false;
     bool shotSoundInitialized_ = false;
+
+    glm::vec3 calculateEnvironmentLight(const glm::vec3& playerPos, const Scene& scene);
+    float muzzleLightPulse_{0.0f}; // NOWE: timer dla światła błysku
 
     double lastFrameTime_{0.0};
 };

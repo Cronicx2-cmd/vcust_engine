@@ -8,6 +8,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -36,6 +37,124 @@ static GLuint compileShader(GLenum type, const std::string& source) {
     }
 
     return shader;
+}
+
+static float floorLuminance(const glm::vec3& color)
+{
+    return glm::dot(
+        color,
+        glm::vec3(0.299f, 0.587f, 0.114f)
+    );
+}
+
+static glm::vec3 sampleImageLinear(
+    const Image& image,
+    float u,
+    float v)
+{
+    if (image.w <= 0 || image.h <= 0 ||
+        image.rgba.size() <
+            static_cast<std::size_t>(image.w) *
+            static_cast<std::size_t>(image.h) * 4)
+    {
+        return glm::vec3(0.45f);
+    }
+
+    // Dopasowanie do filtrowania liniowego OpenGL.
+    const float fx = u * image.w - 0.5f;
+    const float fy = v * image.h - 0.5f;
+
+    const int x0 = static_cast<int>(std::floor(fx));
+    const int y0 = static_cast<int>(std::floor(fy));
+
+    const float tx = fx - static_cast<float>(x0);
+    const float ty = fy - static_cast<float>(y0);
+
+    auto wrap = [](int index, int size) {
+        index %= size;
+        return index < 0 ? index + size : index;
+    };
+
+    auto texel = [&](int x, int y) -> glm::vec3 {
+        x = wrap(x, image.w);
+        y = wrap(y, image.h);
+
+        const std::size_t index =
+            (static_cast<std::size_t>(y) * image.w + x) * 4;
+
+        constexpr float inv255 = 1.0f / 255.0f;
+
+        return glm::vec3(
+            image.rgba[index]     * inv255,
+            image.rgba[index + 1] * inv255,
+            image.rgba[index + 2] * inv255
+        );
+    };
+
+    const glm::vec3 c00 = texel(x0,     y0);
+    const glm::vec3 c10 = texel(x0 + 1, y0);
+    const glm::vec3 c01 = texel(x0,     y0 + 1);
+    const glm::vec3 c11 = texel(x0 + 1, y0 + 1);
+
+    const glm::vec3 bottom = glm::mix(c00, c10, tx);
+    const glm::vec3 top    = glm::mix(c01, c11, tx);
+
+    return glm::mix(bottom, top, ty);
+}
+
+static float sampleLocalFloorLight(
+    const Image& image,
+    float averageLuminance,
+    const glm::vec3& playerPos,
+    bool brushFloor)
+{
+    if (image.w <= 0 || image.h <= 0 || image.rgba.empty()) {
+        return 1.0f;
+    }
+
+    constexpr float radius = 0.45f;
+    float totalLuminance = 0.0f;
+    int sampleCount = 0;
+
+    const float reference = std::max(averageLuminance, 0.05f);
+
+    for (int ix = -1; ix <= 1; ++ix) {
+        for (int iz = -1; iz <= 1; ++iz) {
+            const float x = playerPos.x + ix * radius;
+            const float z = playerPos.z + iz * radius;
+
+            const float u = (brushFloor ? z : x) * 0.25f;
+            const float v = (brushFloor ? x : z) * 0.25f;
+
+            const glm::vec3 color =
+                sampleImageLinear(image, u, v);
+
+            float luminance = glm::dot(
+                color,
+                glm::vec3(0.299f, 0.587f, 0.114f)
+            );
+
+            if (glm::length(color) < 0.05f) {
+                luminance = 0.4f;
+            }
+
+            totalLuminance += luminance;
+            ++sampleCount;
+        }
+    }
+
+    if (sampleCount == 0) {
+        return 1.0f;
+    }
+
+    const float localLuminance =
+        totalLuminance / static_cast<float>(sampleCount);
+
+    return std::clamp(
+        localLuminance / reference,
+        0.45f,
+        1.35f
+    );
 }
 
 static GLuint makeShader(const char* vertexSource, const char* fragmentSource) {
@@ -234,6 +353,8 @@ out vec4 FragColor;
 
 uniform sampler2D uFloorTex;
 uniform sampler2D uWallTex;
+uniform vec3 uSunDir;      // NOWE: kierunek słońca
+uniform vec3 uSunColor;    // NOWE: kolor słońca
 
 void main() {
     bool isFloor = vMaterial > 0.5 && vMaterial < 1.5;
@@ -241,8 +362,6 @@ void main() {
                              : texture(uWallTex, vUV).rgb;
 
     if (!isFloor) {
-        // Keep the existing desaturation of the wall texture, without
-        // affecting floor material or the material ID itself.
         if (baseColor.r > baseColor.b * 1.3 && baseColor.r > 0.25) {
             baseColor *= 0.05;
         } else {
@@ -251,28 +370,40 @@ void main() {
         }
     }
 
-    // Additional brush materials can reuse the current wall texture while
-    // receiving distinct surface tints. New texture slots can be added later.
     if (vMaterial > 1.5 && vMaterial < 2.5) {
-        baseColor *= vec3(0.72, 0.80, 0.90); // metal
+        baseColor *= vec3(0.72, 0.80, 0.90);
     } else if (vMaterial >= 2.5) {
-        baseColor = mix(baseColor, vec3(0.82, 0.86, 0.90), 0.38); // light panel
+        baseColor = mix(baseColor, vec3(0.82, 0.86, 0.90), 0.38);
     }
 
     if (length(baseColor) < 0.05) {
         baseColor = isFloor ? vec3(0.4, 0.4, 0.4) : vec3(0.05, 0.05, 0.05);
     }
 
-    vec3 finalColor = baseColor * 0.7;
-    float heightFactor = clamp(vWorldPos.y * 0.2, 0.0, 0.4);
-    finalColor += baseColor * heightFactor;
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-    float diff = max(dot(normalize(vNormal), lightDir), 0.0);
-    finalColor += baseColor * diff * 0.2;
+    // --- NOWE OŚWIETLENIE (Słońce + Ambient) ---
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(uSunDir);
+    
+    // Cień: im bardziej powierzchnia jest odwrócona od słońca, tym ciemniejsza
+    float sunIntensity = max(dot(N, L), 0.0);
+    
+    // Ambient: bazowy cień (żeby w cieniach nie było czarno)
+    vec3 ambient = baseColor * 0.25f;
+    
+    // Kolor słońca (zależny od kąta)
+    vec3 sunLight = baseColor * uSunColor * sunIntensity;
+    
+    // Dodatkowe "baked lighting" (to co było wcześniej, ale delikatniej)
+    float heightFactor = clamp(vWorldPos.y * 0.1, 0.0, 0.2);
+    vec3 heightLight = baseColor * heightFactor;
 
-    float edgeShadow = 1.0;
-    if (!isFloor) edgeShadow = clamp(vWorldPos.y / 1.5, 0.3, 1.0);
-    finalColor *= edgeShadow;
+    vec3 finalColor = ambient + sunLight + heightLight;
+    
+    // Delikatne przyciemnienie dołu ścian (dla klimatu)
+    if (!isFloor) {
+        finalColor *= clamp(vWorldPos.y / 2.0, 0.5, 1.0);
+    }
+
     FragColor = vec4(finalColor, 1.0);
 }
 )";
@@ -389,33 +520,73 @@ layout(location=1) in vec3 aNrm;
 layout(location=2) in vec2 aUV;
 
 uniform mat4 uProj;
-uniform mat4 uView;      
-uniform vec3 uGunOffset; 
-uniform mat4 uGunRot;    
+uniform mat4 uView;
+uniform vec3 uGunOffset;
+uniform mat4 uGunRot;
 
 out vec3 vNormal;
 out vec2 vUV;
+out vec3 vViewPos; // NOWE
 
 void main() {
     vec4 localPos = uGunRot * vec4(aPos * 0.001, 1.0);
     vec4 viewPos = localPos + vec4(uGunOffset, 0.0);
+
     gl_Position = uProj * viewPos;
-    vNormal = mat3(uView) * mat3(uGunRot) * aNrm;
+    vViewPos = viewPos.xyz; // Przekazujemy pozycję do fragmentów
+
+    vNormal = normalize(mat3(uView) * mat3(uGunRot) * aNrm);
     vUV = aUV;
 }
 )";
 
 static const char* GUN_FS = R"(
 #version 330 core
+
 in vec3 vNormal;
 in vec2 vUV;
+in vec3 vViewPos;
+
 out vec4 FragColor;
+
 uniform sampler2D uTex;
-uniform float uFlash; 
+uniform float uFlash;
+uniform vec3 uAmbientColor;  // Otoczenie (z podłogi/ścian)
+uniform float uMuzzleLight;  // Błysk z lufy
+uniform vec3 uSunColor;      // Kolor słońca
+uniform vec3 uSunDirView;    // Kierunek słońca w przestrzeni kamery
 
 void main() {
     vec3 texColor = texture(uTex, vUV).rgb;
-    FragColor = vec4(texColor * (0.8 + uFlash * 2.0), 1.0);
+    vec3 normal = normalize(vNormal);
+    
+    // 1. Światło słońca (w przestrzeni widoku)
+    float sunIntensity = max(dot(normal, normalize(uSunDirView)), 0.0);
+    vec3 sunLight = uSunColor * sunIntensity * 0.8f;
+    
+    // 2. Ambient z otoczenia
+    vec3 ambient = uAmbientColor * 0.6f;
+    
+    // 3. Światło kierunkowe (stare, żeby broń nie była płaska)
+    vec3 lightDir = normalize(vec3(-0.4f, -0.8f, -0.5f));
+    float diffuse = max(dot(normal, lightDir), 0.0);
+    vec3 fillLight = vec3(0.75f) * diffuse * 0.3f;
+    
+    vec3 lighting = ambient + sunLight + fillLight;
+    
+    // 4. Błysk z lufy
+    vec3 flashPos = vec3(0.25, -0.15, -0.5); 
+    float distToFlash = length(vViewPos - flashPos);
+    float flashIntensity = uMuzzleLight * max(0.0, 1.0 - (distToFlash / 1.5));
+    vec3 flashColor = vec3(1.0, 0.6, 0.2);
+    
+    lighting += flashColor * flashIntensity * 2.0;
+
+    // 5. Ostateczny kolor
+    vec3 litColor = texColor * lighting;
+    litColor *= 1.0 + uFlash * 1.6;
+
+    FragColor = vec4(litColor, 1.0);
 }
 )";
 
@@ -683,6 +854,32 @@ void OpenGLEngine::setSceneAssets(const Image& bg, const Image& map, const Image
     mapTex_ = makeTexture(map);
     floorTex_ = floorTex.rgba.empty() ? 0 : makeTexture(floorTex);
     wallTex_ = wallTex.rgba.empty() ? 0 : makeTexture(wallTex);
+
+    floorLightImage_ = floorTex;
+
+    float luminanceSum = 0.0f;
+    std::size_t pixelCount = 0;
+
+    for (std::size_t i = 0; i + 3 < floorTex.rgba.size(); i += 4) {
+        glm::vec3 color(
+            floorTex.rgba[i]     / 255.0f,
+            floorTex.rgba[i + 1] / 255.0f,
+            floorTex.rgba[i + 2] / 255.0f
+        );
+
+        if (glm::length(color) < 0.05f) {
+            color = glm::vec3(0.4f);
+        }
+
+        luminanceSum += floorLuminance(color);
+        ++pixelCount;
+    }
+
+    floorAverageLuminance_ = pixelCount > 0
+        ? luminanceSum / static_cast<float>(pixelCount)
+        : 0.45f;
+
+    gunWorldLight_ = 1.0f;
 }
 
 void OpenGLEngine::drawFrame(const Scene& scene, const glm::vec3& playerPos,
@@ -705,7 +902,7 @@ void OpenGLEngine::drawFrame(const Scene& scene, const glm::vec3& playerPos,
         enemy.draw(*this, camera);
     }
 
-    drawGun(camera, w, h, isShooting);
+    drawGun(camera, w, h, isShooting, scene, playerPos);
     drawMinimap(scene, minimap, minimap.build(scene, playerPos, playerYaw, camera.yaw, w, h));
     renderHealthbar(w, h);
 }
@@ -739,6 +936,11 @@ void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm
     const float aspect = float(w) / float(h);
     const glm::mat4 vp = camera.projection(aspect) * camera.view();
     glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uVP"), 1, GL_FALSE, glm::value_ptr(vp));
+
+    glm::vec3 sunDir = glm::normalize(glm::vec3(0.5f, 1.0f, 0.3f));
+    glm::vec3 sunColor(1.0f, 0.95f, 0.85f);
+    glUniform3fv(glGetUniformLocation(sceneShader_, "uSunDir"), 1, glm::value_ptr(sunDir));
+    glUniform3fv(glGetUniformLocation(sceneShader_, "uSunColor"), 1, glm::value_ptr(sunColor));
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, floorTex_);
@@ -801,8 +1003,40 @@ void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm
     glBindVertexArray(0);
 }
 
-void OpenGLEngine::drawGun(const Camera& camera, int w, int h, bool isShooting) {
-    // 1. Czyścimy bufor głębi, żeby broń zawsze była na wierzchu
+glm::vec3 OpenGLEngine::calculateEnvironmentLight(const glm::vec3& playerPos, const Scene& scene) {
+    // Bazowy kolor (ciemny, żeby w ciemnych miejscach broń była ciemna)
+    glm::vec3 ambientColor(0.25f, 0.25f, 0.28f); 
+
+    // 1. Wpływ podłogi (używamy starej funkcji)
+    if (!floorLightImage_.rgba.empty()) {
+        float floorLum = sampleLocalFloorLight(
+            floorLightImage_, floorAverageLuminance_, playerPos, scene.hasBrushFloorSurface
+        );
+        ambientColor += glm::vec3(floorLum * 0.5f); // Podłoga dodaje światło
+    }
+
+    // 2. Wpływ najbliższej ściany (uproszczony)
+    float closestDist = 999.0f;
+    for (const Aabb& wall : scene.walls) {
+        glm::vec3 closest = glm::clamp(playerPos, wall.min, wall.max);
+        float dist = glm::length(playerPos - closest);
+        if (dist < closestDist) closestDist = dist;
+    }
+
+    // Jeśli stoisz blisko ściany, broń dostaje jej odblask
+    if (closestDist < 1.5f) {
+        float influence = 1.0f - (closestDist / 1.5f);
+        ambientColor += glm::vec3(0.3f, 0.3f, 0.3f) * influence; 
+    }
+
+    // Dodatkowe światło od "słońca" (żeby broń nie była czarna w otwartym polu)
+    ambientColor += glm::vec3(0.1f, 0.1f, 0.1f);
+
+    // Upewniamy się, że nie przekraczamy 1.0
+    return glm::clamp(ambientColor, glm::vec3(0.0f), glm::vec3(1.5f));
+}
+
+void OpenGLEngine::drawGun(const Camera& camera, int w, int h, bool isShooting, const Scene& scene, const glm::vec3& playerPos) {
     glClear(GL_DEPTH_BUFFER_BIT);
     glUseProgram(gunShader_);
 
@@ -812,10 +1046,12 @@ void OpenGLEngine::drawGun(const Camera& camera, int w, int h, bool isShooting) 
         : (1.0f / 60.0f);
     lastFrameTime_ = now;
 
-    // 2. Logika strzelania (Fire Rate - "piu piu piu")
+    // 1. Logika strzelania
     if (isShooting && fireCooldown_ <= 0.0f) {
         shotPulse_ = 1.0f;        
-        fireCooldown_ = 0.1f;     // 10 strzałów na sekundę
+        fireCooldown_ = 0.1f;     
+        muzzleLightPulse_ = 1.0f; // NOWE: Uruchamiamy błysk światła
+        
         if (shotSoundInitialized_) {
             ma_sound_seek_to_pcm_frame(&shotSound_, 0);
             ma_sound_start(&shotSound_);
@@ -823,24 +1059,27 @@ void OpenGLEngine::drawGun(const Camera& camera, int w, int h, bool isShooting) 
     }
     if (fireCooldown_ > 0.0f) fireCooldown_ -= dt;
     
-    // Wygaszanie impulsu (błysku)
     if (shotPulse_ > 0.0f) {
         shotPulse_ -= dt * 10.0f; 
         if (shotPulse_ < 0.0f) shotPulse_ = 0.0f;
     }
 
-    // 3. Płynny recoil (Smooth Recoil)
+    // Wygaszanie światła błysku (bardzo szybkie)
+    if (muzzleLightPulse_ > 0.0f) {
+        muzzleLightPulse_ -= dt * 15.0f; // Wygasa w ~0.06s
+        if (muzzleLightPulse_ < 0.0f) muzzleLightPulse_ = 0.0f;
+    }
+
+    // 2. Recoil
     float targetRecoil = shotPulse_ > 0.5f ? 1.0f : 0.0f; 
     float speed = targetRecoil > currentRecoil_ ? 30.0f : 15.0f; 
     currentRecoil_ += (targetRecoil - currentRecoil_) * speed * dt;
 
     float recoilZ = currentRecoil_ * 0.08f; 
     float recoilY = currentRecoil_ * 0.03f;
-    
-    // Błysk (jasność broni) - tylko gdy strzelamy
     float flash = shotPulse_ > 0.0f ? 0.5f : 0.0f; 
 
-    // 4. Macierze
+    // 3. Macierze
     const float aspect = float(w) / float(h);
     glm::mat4 proj = camera.projection(aspect);
     glm::mat4 view = glm::mat4(glm::mat3(camera.view()));
@@ -848,16 +1087,28 @@ void OpenGLEngine::drawGun(const Camera& camera, int w, int h, bool isShooting) 
     glUniformMatrix4fv(glGetUniformLocation(gunShader_, "uProj"), 1, GL_FALSE, glm::value_ptr(proj));
     glUniformMatrix4fv(glGetUniformLocation(gunShader_, "uView"), 1, GL_FALSE, glm::value_ptr(view));
 
-    // Przesunięcie i obrót broni
     glUniform3f(glGetUniformLocation(gunShader_, "uGunOffset"), 0.25f, -0.25f + recoilY, -0.5f + recoilZ); 
     glm::mat4 gunRot = glm::rotate(glm::mat4(1.0f), glm::radians(180.f), glm::vec3(0.f, 1.f, 0.f)); 
     gunRot = glm::rotate(gunRot, glm::radians(currentRecoil_ * 3.0f), glm::vec3(1.f, 0.f, 0.f));
     glUniformMatrix4fv(glGetUniformLocation(gunShader_, "uGunRot"), 1, GL_FALSE, glm::value_ptr(gunRot));
     
-    // Efekt rozjaśnienia broni
     glUniform1f(glGetUniformLocation(gunShader_, "uFlash"), flash);
 
-    // 5. Rysowanie modelu broni
+    // 4. DYNAMICZNE OŚWIETLENIE OTOCZENIA
+    glm::vec3 envLight = calculateEnvironmentLight(playerPos, scene);
+    glUniform3fv(glGetUniformLocation(gunShader_, "uAmbientColor"), 1, glm::value_ptr(envLight));
+    
+    // Przekazujemy błysk
+    glUniform1f(glGetUniformLocation(gunShader_, "uMuzzleLight"), muzzleLightPulse_);
+
+    glm::vec3 sunDirWorld = glm::normalize(glm::vec3(0.5f, 1.0f, 0.3f));
+    glm::mat3 viewRot = glm::mat3(camera.view());
+    glm::vec3 sunDirView = viewRot * sunDirWorld; // Transformacja do przestrzeni kamery
+    
+    glUniform3f(glGetUniformLocation(gunShader_, "uSunColor"), 1.0f, 0.95f, 0.85f);
+    glUniform3fv(glGetUniformLocation(gunShader_, "uSunDirView"), 1, glm::value_ptr(sunDirView));
+
+    // 5. Rysowanie broni
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, gunTexture_);
     glUniform1i(glGetUniformLocation(gunShader_, "uTex"), 0);
@@ -869,27 +1120,19 @@ void OpenGLEngine::drawGun(const Camera& camera, int w, int h, bool isShooting) 
     // 6. Rysowanie Muzzle Flash (Bloom)
     if (shotPulse_ > 0.0f) {
         glUseProgram(muzzleShader_);
-        
-        // Włączamy blending dla poświaty (efekt świecenia)
         glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE); // Additive blending
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE); 
         
-        // Pozycja błysku (przy lufie)
         glm::vec3 muzzleOffset = glm::vec3(0.25f, -0.15f + recoilY, -0.8f + recoilZ);
         glUniform3fv(glGetUniformLocation(muzzleShader_, "uOffset"), 1, glm::value_ptr(muzzleOffset));
-        
-        // Skalowanie błysku (rośnie i maleje)
         float flashScale = 0.03f + (shotPulse_ * 0.04f); 
         glUniform1f(glGetUniformLocation(muzzleShader_, "uScale"), flashScale);
         glUniformMatrix4fv(glGetUniformLocation(muzzleShader_, "uProj"), 1, GL_FALSE, glm::value_ptr(proj));
 
         glBindVertexArray(muzzleVAO_);
         glDisable(GL_CULL_FACE);
-        
-        // Rysujemy QUAD (6 wierzchołków)!
         glDrawArrays(GL_TRIANGLES, 0, 6);
-        
-        glDisable(GL_BLEND); // Wyłączamy blending po narysowaniu
+        glDisable(GL_BLEND);
         glBindVertexArray(0);
     }
 }
