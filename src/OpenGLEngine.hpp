@@ -37,6 +37,9 @@ public:
     // Funkcje publiczne
     void setSceneAssets(const Image& background, const Image& minimapTex, const Image& floorTex, const Image& wallTex);
     void setGunAssets(const std::string& objPath, const Image& texImage);
+    void setEnemyAssets(const std::string& objPath);
+    void drawEnemyModel(const std::string& objectName, const glm::vec3& position,
+                        const glm::vec4& color, const Camera& camera);
     void drawMenu();
     void drawEnemyCube(const glm::vec3& min, const glm::vec3& max, const glm::vec4& color, const Camera& camera);
     void loadMenu(const std::string& path); // <--- PRZENIESIONE TUTAJ DO SEKCJI PUBLICZNEJ
@@ -104,6 +107,9 @@ private:
     uint32_t bgTex_{0}, mapTex_{0}, floorTex_{0}, wallTex_{0};
     
     Model gunModel_;
+    Model enemyGruntModel_;
+    Model enemyRunnerModel_;
+    Model enemyTankModel_;
     uint32_t gunTexture_{0};
 
     ma_engine audioEngine_;

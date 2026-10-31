@@ -2,15 +2,21 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "external/tiny_obj_loader.h"
 #include <iostream>
+#include <vector>
 
-// Przenieś tutaj całą implementację klasy Model (tę, którą dałem wcześniej)
 bool Model::load(const std::string& path) {
+    return load(path, {});
+}
+
+bool Model::load(const std::string& path, const std::string& objectName) {
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> shapes;
     std::vector<tinyobj::material_t> materials;
     std::string warn, err;
 
-    bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str());
+    const bool ret = tinyobj::LoadObj(
+        &attrib, &shapes, &materials, &warn, &err, path.c_str()
+    );
     if (!warn.empty()) std::cout << "WARN: " << warn << std::endl;
     if (!err.empty()) std::cerr << "ERR: " << err << std::endl;
     if (!ret) return false;
@@ -19,31 +25,56 @@ bool Model::load(const std::string& path) {
     std::vector<unsigned int> indices;
 
     for (const auto& shape : shapes) {
-        for (const auto& index : shape.mesh.indices) {
-            // Pozycja
-            vertices.push_back(attrib.vertices[3 * index.vertex_index + 0]);
-            vertices.push_back(attrib.vertices[3 * index.vertex_index + 1]);
-            vertices.push_back(attrib.vertices[3 * index.vertex_index + 2]);
+        if (!objectName.empty() && shape.name != objectName) {
+            continue;
+        }
 
-            // Normalne
+        for (const auto& index : shape.mesh.indices) {
+            if (index.vertex_index < 0) continue;
+
+            const std::size_t vertexOffset =
+                static_cast<std::size_t>(index.vertex_index) * 3;
+            if (vertexOffset + 2 >= attrib.vertices.size()) continue;
+
+            vertices.push_back(attrib.vertices[vertexOffset + 0]);
+            vertices.push_back(attrib.vertices[vertexOffset + 1]);
+            vertices.push_back(attrib.vertices[vertexOffset + 2]);
+
             if (index.normal_index >= 0) {
-                vertices.push_back(attrib.normals[3 * index.normal_index + 0]);
-                vertices.push_back(attrib.normals[3 * index.normal_index + 1]);
-                vertices.push_back(attrib.normals[3 * index.normal_index + 2]);
+                const std::size_t normalOffset =
+                    static_cast<std::size_t>(index.normal_index) * 3;
+                if (normalOffset + 2 < attrib.normals.size()) {
+                    vertices.push_back(attrib.normals[normalOffset + 0]);
+                    vertices.push_back(attrib.normals[normalOffset + 1]);
+                    vertices.push_back(attrib.normals[normalOffset + 2]);
+                } else {
+                    vertices.insert(vertices.end(), {0.0f, 1.0f, 0.0f});
+                }
             } else {
-                vertices.push_back(0.0f); vertices.push_back(1.0f); vertices.push_back(0.0f);
+                vertices.insert(vertices.end(), {0.0f, 1.0f, 0.0f});
             }
 
-            // UV
             if (index.texcoord_index >= 0) {
-                vertices.push_back(attrib.texcoords[2 * index.texcoord_index + 0]);
-                vertices.push_back(1.0f - attrib.texcoords[2 * index.texcoord_index + 1]);
+                const std::size_t uvOffset =
+                    static_cast<std::size_t>(index.texcoord_index) * 2;
+                if (uvOffset + 1 < attrib.texcoords.size()) {
+                    vertices.push_back(attrib.texcoords[uvOffset + 0]);
+                    vertices.push_back(1.0f - attrib.texcoords[uvOffset + 1]);
+                } else {
+                    vertices.insert(vertices.end(), {0.0f, 0.0f});
+                }
             } else {
-                vertices.push_back(0.0f); vertices.push_back(0.0f);
+                vertices.insert(vertices.end(), {0.0f, 0.0f});
             }
 
             indices.push_back(static_cast<unsigned int>(indices.size()));
         }
+    }
+
+    if (indices.empty()) {
+        std::cerr << "OBJ object not found or empty: "
+                  << (objectName.empty() ? path : objectName) << '\n';
+        return false;
     }
 
     indexCount = static_cast<int>(indices.size());
@@ -53,22 +84,38 @@ bool Model::load(const std::string& path) {
     glGenBuffers(1, &ebo);
 
     glBindVertexArray(vao);
-
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        vertices.size() * sizeof(float),
+        vertices.data(),
+        GL_STATIC_DRAW
+    );
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        indices.size() * sizeof(unsigned int),
+        indices.data(),
+        GL_STATIC_DRAW
+    );
 
-    int stride = 8 * sizeof(float);
-    glEnableVertexAttribArray(0); // Pos
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1); // Normal
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(2); // UV
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));
+    const GLsizei stride = 8 * static_cast<GLsizei>(sizeof(float));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 3, GL_FLOAT, GL_FALSE, stride,
+        reinterpret_cast<void*>(3 * sizeof(float))
+    );
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(
+        2, 2, GL_FLOAT, GL_FALSE, stride,
+        reinterpret_cast<void*>(6 * sizeof(float))
+    );
 
     glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
     return true;
 }
 

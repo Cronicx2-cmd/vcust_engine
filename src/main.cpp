@@ -33,6 +33,15 @@ int main(int argc, char** argv) {
 
         engine.loadMenu((exeDir / "content" / "ui" / "menu.txt").string());
 
+        const auto enemyObjPath =
+            exeDir / "content" / "models" / "enemy" / "enemies.obj";
+        if (std::filesystem::exists(enemyObjPath)) {
+            engine.setEnemyAssets(enemyObjPath.string());
+        } else {
+            std::cerr << "Enemy model file not found: "
+                      << enemyObjPath.string() << '\n';
+        }
+
         auto applyScene = [&](const std::string& id, bool resetPlayer) {
             Scene s = scenes.load(id);
             const Image bg = loadImageRGBA(s.background);

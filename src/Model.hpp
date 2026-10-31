@@ -14,4 +14,5 @@ public:
     ~Model();
 
     bool load(const std::string& path);
+    bool load(const std::string& path, const std::string& objectName);
 };
