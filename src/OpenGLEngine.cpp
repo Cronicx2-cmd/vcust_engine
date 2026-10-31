@@ -7,12 +7,14 @@
 #include "Enemy.hpp"
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -307,6 +309,7 @@ layout(location=2) in vec2 aUV;
 layout(location=3) in float aMaterial;
 
 uniform mat4 uVP;
+uniform mat4 uView;
 uniform vec3 uOffset;
 uniform vec3 uScale;
 uniform vec4 uColor;
@@ -315,6 +318,7 @@ uniform float uUseVertexMaterial;
 out vec3 vColor;
 out vec3 vWorldPos;
 out vec3 vNormal;
+out vec3 vViewNormal;
 out vec2 vUV;
 out float vChecker;
 out float vMaterial;
@@ -323,6 +327,8 @@ void main() {
     vec3 world = uOffset + aPos * uScale;
     vWorldPos = world;
     vNormal = aNrm;
+    vec3 scaledNormal = aNrm / max(abs(uScale), vec3(0.0001));
+    vViewNormal = normalize(mat3(uView) * normalize(scaledNormal));
     vMaterial = uUseVertexMaterial > 0.5 ? aMaterial : (uColor.a > 0.5 ? 1.0 : 0.0);
     vChecker = vMaterial;
     vColor = uColor.rgb;
@@ -347,11 +353,13 @@ static const char* SCENE_FS = R"(
 in vec3 vColor;
 in vec3 vWorldPos;
 in vec3 vNormal;
+in vec3 vViewNormal;
 in vec2 vUV;
 in float vChecker;
 in float vMaterial;
 
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+layout(location = 1) out vec4 NormalColor;
 
 uniform sampler2D uFloorTex;
 uniform sampler2D uWallTex;
@@ -414,6 +422,86 @@ void main() {
     );
 
     FragColor = vec4(finalColor, 1.0);
+    NormalColor = vec4(normalize(vViewNormal), 1.0);
+}
+)";
+
+static const char* SSAO_VS = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+out vec2 vUV;
+void main() { vUV = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }
+)";
+
+static const char* SSAO_FS = R"(
+#version 330 core
+in vec2 vUV;
+out float FragColor;
+uniform sampler2D uDepth;
+uniform sampler2D uNormal;
+uniform mat4 uProjection;
+uniform mat4 uInvProjection;
+uniform vec3 uSamples[16];
+uniform float uRadius;
+uniform float uBias;
+vec3 reconstructViewPosition(vec2 uv, float depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 view = uInvProjection * clip;
+    return view.xyz / max(view.w, 0.000001);
+}
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+void main() {
+    float depth = texture(uDepth, vUV).r;
+    if (depth >= 0.999999) { FragColor = 0.0; return; }
+    vec3 fragPos = reconstructViewPosition(vUV, depth);
+    vec3 normal = normalize(texture(uNormal, vUV).xyz);
+    vec2 seed = floor(gl_FragCoord.xy);
+    vec3 randomVec = normalize(vec3(hash12(seed), hash12(seed + vec2(17.0,31.0)), 0.0) * 2.0 - 1.0);
+    vec3 tangent = randomVec - normal * dot(randomVec, normal);
+    if (dot(tangent, tangent) < 0.0001) {
+        tangent = cross(normal, vec3(0.0,1.0,0.0));
+        if (dot(tangent,tangent) < 0.0001) tangent = cross(normal, vec3(1.0,0.0,0.0));
+    }
+    tangent = normalize(tangent);
+    vec3 bitangent = normalize(cross(normal, tangent));
+    mat3 tbn = mat3(tangent, bitangent, normal);
+    float occlusion = 0.0;
+    for (int i=0; i<16; ++i) {
+        vec3 samplePos = fragPos + tbn * uSamples[i] * uRadius;
+        vec4 projected = uProjection * vec4(samplePos,1.0);
+        projected.xyz /= projected.w;
+        vec2 sampleUV = projected.xy * 0.5 + 0.5;
+        if (sampleUV.x<0.0 || sampleUV.x>1.0 || sampleUV.y<0.0 || sampleUV.y>1.0) continue;
+        float sampleDepth = texture(uDepth,sampleUV).r;
+        if (sampleDepth >= 0.999999) continue;
+        vec3 sampleViewPos = reconstructViewPosition(sampleUV,sampleDepth);
+        float rangeCheck = smoothstep(0.0,1.0,uRadius/max(abs(fragPos.z-sampleViewPos.z),0.0001));
+        if (sampleViewPos.z >= samplePos.z + uBias) occlusion += rangeCheck;
+    }
+    FragColor = clamp(occlusion/16.0,0.0,1.0);
+}
+)";
+
+static const char* COMPOSITE_FS = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uSceneColor;
+uniform sampler2D uAO;
+uniform vec2 uTexelSize;
+uniform float uStrength;
+void main() {
+    float ao=0.0;
+    for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x)
+        ao += texture(uAO,vUV+vec2(float(x),float(y))*uTexelSize).r;
+    ao /= 9.0;
+    vec4 color=texture(uSceneColor,vUV);
+    color.rgb *= 1.0-clamp(ao*uStrength,0.0,0.85);
+    FragColor=color;
 }
 )";
 
@@ -795,6 +883,8 @@ OpenGLEngine::~OpenGLEngine() {
         audioInitialized_ = false;
     }
 
+    destroySsaoTargets();
+
     for (auto& button : menuButtons_) {
         if (button.textureID != 0) {
             const GLuint texture = static_cast<GLuint>(button.textureID);
@@ -813,7 +903,8 @@ OpenGLEngine::~OpenGLEngine() {
     }
 
     const GLuint programs[] = {
-        skyboxShader_, sceneShader_, uiShader_, gunShader_, muzzleShader_, menuShader_
+        skyboxShader_, sceneShader_, uiShader_, ssaoShader_, compositeShader_,
+        gunShader_, muzzleShader_, menuShader_
     };
     for (const GLuint program : programs) {
         if (program != 0) {
@@ -861,6 +952,8 @@ OpenGLEngine::~OpenGLEngine() {
 void OpenGLEngine::setupGL() {
     skyboxShader_ = makeShader(SKYBOX_VS, SKYBOX_FS);
     sceneShader_  = makeShader(SCENE_VS, SCENE_FS);
+    ssaoShader_ = makeShader(SSAO_VS, SSAO_FS);
+    compositeShader_ = makeShader(SSAO_VS, COMPOSITE_FS);
     uiShader_     = makeShader(UI_VS, UI_FS);
     gunShader_    = makeShader(GUN_VS, GUN_FS);
     muzzleShader_ = makeShader(MUZZLE_VS, MUZZLE_FS);
@@ -869,6 +962,23 @@ void OpenGLEngine::setupGL() {
     makeQuadVAO(skyboxVAO_, skyboxVBO_);
     makeQuadVAO(quadVAO_, quadVBO_);
     makeCubeVAO(cubeVAO_, cubeVBO_);
+
+    // Stable cosine-weighted hemisphere samples for SSAO.
+    std::array<glm::vec3,16> kernel{};
+    std::mt19937 rng(1337);
+    std::uniform_real_distribution<float> unit(0.0f,1.0f);
+    for(std::size_t i=0;i<kernel.size();++i) {
+        glm::vec3 sample(unit(rng)*2.0f-1.0f,unit(rng)*2.0f-1.0f,unit(rng));
+        sample=glm::normalize(sample);
+        float t=static_cast<float>(i)/static_cast<float>(kernel.size());
+        kernel[i]=sample*glm::mix(0.1f,1.0f,t*t);
+    }
+    glUseProgram(ssaoShader_);
+    glUniform3fv(glGetUniformLocation(ssaoShader_,"uSamples[0]"),
+                 static_cast<GLsizei>(kernel.size()),glm::value_ptr(kernel[0]));
+    glUniform1f(glGetUniformLocation(ssaoShader_,"uRadius"),0.65f);
+    glUniform1f(glGetUniformLocation(ssaoShader_,"uBias"),0.025f);
+    glUseProgram(0);
 
     // Dynamic world mesh generated by SceneManager from convex brush planes.
     glGenVertexArrays(1, &brushVAO_);
@@ -907,6 +1017,73 @@ void OpenGLEngine::setupGL() {
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glBindVertexArray(0);
     
+}
+
+
+void OpenGLEngine::destroySsaoTargets() {
+    if(ssaoColorTex_) glDeleteTextures(1,&ssaoColorTex_);
+    if(sceneDepthTex_) glDeleteTextures(1,&sceneDepthTex_);
+    if(sceneNormalTex_) glDeleteTextures(1,&sceneNormalTex_);
+    if(sceneColorTex_) glDeleteTextures(1,&sceneColorTex_);
+    if(ssaoFbo_) glDeleteFramebuffers(1,&ssaoFbo_);
+    if(sceneFbo_) glDeleteFramebuffers(1,&sceneFbo_);
+    ssaoColorTex_=sceneDepthTex_=sceneNormalTex_=sceneColorTex_=0;
+    ssaoFbo_=sceneFbo_=0;
+    ssaoWidth_=ssaoHeight_=0;
+}
+
+bool OpenGLEngine::ensureSsaoTargets(int width,int height) {
+    if(width<=0||height<=0) return false;
+    if(sceneFbo_&&ssaoFbo_&&ssaoWidth_==width&&ssaoHeight_==height) return true;
+    destroySsaoTargets();
+    auto configure=[](GLenum target) {
+        glTexParameteri(target,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+        glTexParameteri(target,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        glTexParameteri(target,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        glTexParameteri(target,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    };
+    glGenFramebuffers(1,&sceneFbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER,sceneFbo_);
+    glGenTextures(1,&sceneColorTex_);
+    glBindTexture(GL_TEXTURE_2D,sceneColorTex_);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,width,height,0,GL_RGBA,GL_FLOAT,nullptr);
+    configure(GL_TEXTURE_2D);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,sceneColorTex_,0);
+    glGenTextures(1,&sceneNormalTex_);
+    glBindTexture(GL_TEXTURE_2D,sceneNormalTex_);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,width,height,0,GL_RGBA,GL_FLOAT,nullptr);
+    configure(GL_TEXTURE_2D);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT1,GL_TEXTURE_2D,sceneNormalTex_,0);
+    glGenTextures(1,&sceneDepthTex_);
+    glBindTexture(GL_TEXTURE_2D,sceneDepthTex_);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,width,height,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
+    configure(GL_TEXTURE_2D);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,sceneDepthTex_,0);
+    const GLenum drawBuffers[]={GL_COLOR_ATTACHMENT0,GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2,drawBuffers);
+    const bool sceneOK=glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
+
+    glGenFramebuffers(1,&ssaoFbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER,ssaoFbo_);
+    glGenTextures(1,&ssaoColorTex_);
+    glBindTexture(GL_TEXTURE_2D,ssaoColorTex_);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_R16F,width,height,0,GL_RED,GL_FLOAT,nullptr);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,ssaoColorTex_,0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    const bool aoOK=glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER,0);
+    glBindTexture(GL_TEXTURE_2D,0);
+    if(!sceneOK||!aoOK) {
+        std::cerr<<"SSAO framebuffer creation failed; falling back to the regular renderer.\n";
+        destroySsaoTargets();
+        return false;
+    }
+    ssaoWidth_=width; ssaoHeight_=height;
+    return true;
 }
 
 void OpenGLEngine::setSceneAssets(const Image& bg, const Image& map, const Image& floorTex, const Image& wallTex) {
@@ -951,25 +1128,82 @@ void OpenGLEngine::drawFrame(const Scene& scene, const glm::vec3& playerPos,
                              float playerYaw, const Minimap& minimap,
                              const Camera& camera, bool isShooting,
                              const std::vector<Enemy>& enemies) {
-    int w, h;
-    glfwGetFramebufferSize(window_, &w, &h);
-    if (w == 0 || h == 0) { glfwWaitEvents(); return; }
-    glViewport(0, 0, w, h);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    int w,h;
+    glfwGetFramebufferSize(window_,&w,&h);
+    if(w==0||h==0){glfwWaitEvents();return;}
+    glBindFramebuffer(GL_FRAMEBUFFER,0);
+    glViewport(0,0,w,h);
+    glClearColor(0,0,0,1);
+    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+    drawSkybox(camera,w,h);
 
-    drawSkybox(camera, w, h);
-    drawScene(scene, camera, playerPos);
+    if(ensureSsaoTargets(w,h)) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,0);
+        glReadBuffer(GL_BACK);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER,sceneFbo_);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
 
-    // --- RYSOWANIE WROGÓW (tuż po świecie 3D, przed bronią i UI) ---
-    glEnable(GL_DEPTH_TEST);
-    for (const auto& enemy : enemies) {
-        enemy.draw(*this, camera);
+        glBindFramebuffer(GL_FRAMEBUFFER,sceneFbo_);
+        glViewport(0,0,w,h);
+        const GLenum drawBuffers[]={GL_COLOR_ATTACHMENT0,GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(2,drawBuffers);
+        const GLfloat clearNormal[]={0,0,0,0};
+        glClearBufferfv(GL_COLOR,1,clearNormal);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        drawScene(scene,camera,playerPos);
+
+        glBindFramebuffer(GL_FRAMEBUFFER,ssaoFbo_);
+        glViewport(0,0,w,h);
+        glDisable(GL_DEPTH_TEST);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(ssaoShader_);
+        const float aspect=static_cast<float>(w)/static_cast<float>(h);
+        const glm::mat4 projection=camera.projection(aspect);
+        const glm::mat4 inverseProjection=glm::inverse(projection);
+        glUniformMatrix4fv(glGetUniformLocation(ssaoShader_,"uProjection"),1,GL_FALSE,glm::value_ptr(projection));
+        glUniformMatrix4fv(glGetUniformLocation(ssaoShader_,"uInvProjection"),1,GL_FALSE,glm::value_ptr(inverseProjection));
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,sceneDepthTex_);
+        glUniform1i(glGetUniformLocation(ssaoShader_,"uDepth"),0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,sceneNormalTex_);
+        glUniform1i(glGetUniformLocation(ssaoShader_,"uNormal"),1);
+        glBindVertexArray(quadVAO_);
+        glDrawArrays(GL_TRIANGLES,0,6);
+
+        glBindFramebuffer(GL_FRAMEBUFFER,0);
+        glViewport(0,0,w,h);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glUseProgram(compositeShader_);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,sceneColorTex_);
+        glUniform1i(glGetUniformLocation(compositeShader_,"uSceneColor"),0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,ssaoColorTex_);
+        glUniform1i(glGetUniformLocation(compositeShader_,"uAO"),1);
+        glUniform2f(glGetUniformLocation(compositeShader_,"uTexelSize"),1.0f/w,1.0f/h);
+        glUniform1f(glGetUniformLocation(compositeShader_,"uStrength"),0.85f);
+        glBindVertexArray(quadVAO_);
+        glDrawArrays(GL_TRIANGLES,0,6);
+
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,sceneFbo_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER,0);
+        glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER,0);
+        glBindVertexArray(0);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER,0);
+        glViewport(0,0,w,h);
+        drawScene(scene,camera,playerPos);
     }
 
-    drawGun(camera, w, h, isShooting, scene, playerPos);
-    drawMinimap(scene, minimap, minimap.build(scene, playerPos, playerYaw, camera.yaw, w, h));
-    renderHealthbar(w, h);
+    glEnable(GL_DEPTH_TEST);
+    for(const auto& enemy:enemies) enemy.draw(*this,camera);
+    drawGun(camera,w,h,isShooting,scene,playerPos);
+    drawMinimap(scene,minimap,minimap.build(scene,playerPos,playerYaw,camera.yaw,w,h));
+    renderHealthbar(w,h);
 }
 
 void OpenGLEngine::drawSkybox(const Camera& camera, int w, int h) {
@@ -999,8 +1233,10 @@ void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm
     int w, h;
     glfwGetFramebufferSize(window_, &w, &h);
     const float aspect = float(w) / float(h);
-    const glm::mat4 vp = camera.projection(aspect) * camera.view();
+    const glm::mat4 view = camera.view();
+    const glm::mat4 vp = camera.projection(aspect) * view;
     glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uVP"), 1, GL_FALSE, glm::value_ptr(vp));
+    glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uView"), 1, GL_FALSE, glm::value_ptr(view));
 
     glm::vec3 sunDir = glm::normalize(glm::vec3(0.5f, 1.0f, 0.3f));
     glm::vec3 sunColor(1.0f, 0.95f, 0.85f);
