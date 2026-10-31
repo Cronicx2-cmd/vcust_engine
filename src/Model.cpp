@@ -60,21 +60,14 @@ bool Model::load(const std::string& path, const std::string& objectName) {
                 face < shape.mesh.material_ids.size()
                     ? shape.mesh.material_ids[face] : -1;
 
-            if (materialBatches.empty() ||
-                materialBatches.back().firstIndex +
-                    materialBatches.back().indexCount != indices.size() ||
-                (face == 0 && !materialBatches.empty())) {
-                // A new batch is started below whenever the material changes.
-            }
-
             const bool newBatch =
                 materialBatches.empty() ||
-                materialBatches.back()._materialId != materialId;
+                materialBatches.back().materialId != materialId;
             if (newBatch) {
                 ModelMaterialBatch batch = materialFor(materialId);
                 batch.firstIndex = static_cast<unsigned int>(indices.size());
                 materialBatches.push_back(batch);
-                materialBatches.back()._materialId = materialId;
+                materialBatches.back().materialId = materialId;
             }
 
             const unsigned int faceVertexCount =
