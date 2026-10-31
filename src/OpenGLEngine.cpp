@@ -343,66 +343,75 @@ void main() {
 
 static const char* SCENE_FS = R"(
 #version 330 core
+
 in vec3 vColor;
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
 in float vChecker;
 in float vMaterial;
+
 out vec4 FragColor;
 
 uniform sampler2D uFloorTex;
 uniform sampler2D uWallTex;
-uniform vec3 uSunDir;      // NOWE: kierunek słońca
-uniform vec3 uSunColor;    // NOWE: kolor słońca
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
 
 void main() {
     bool isFloor = vMaterial > 0.5 && vMaterial < 1.5;
-    vec3 baseColor = isFloor ? texture(uFloorTex, vUV).rgb
-                             : texture(uWallTex, vUV).rgb;
 
-    if (!isFloor) {
-        if (baseColor.r > baseColor.b * 1.3 && baseColor.r > 0.25) {
-            baseColor *= 0.05;
-        } else {
-            float gray = dot(baseColor, vec3(0.299, 0.587, 0.114));
-            baseColor = vec3(gray);
-        }
-    }
+    vec3 baseColor = isFloor
+        ? texture(uFloorTex, vUV).rgb
+        : texture(uWallTex, vUV).rgb;
 
+    // Material tinting
     if (vMaterial > 1.5 && vMaterial < 2.5) {
-        baseColor *= vec3(0.72, 0.80, 0.90);
-    } else if (vMaterial >= 2.5) {
-        baseColor = mix(baseColor, vec3(0.82, 0.86, 0.90), 0.38);
+        baseColor *= vec3(0.82, 0.88, 0.98);
+    }
+    else if (vMaterial >= 2.5) {
+        baseColor = mix(
+            baseColor,
+            vec3(0.82, 0.88, 0.96),
+            0.18
+        );
     }
 
-    if (length(baseColor) < 0.05) {
-        baseColor = isFloor ? vec3(0.4, 0.4, 0.4) : vec3(0.05, 0.05, 0.05);
-    }
-
-    // --- NOWE OŚWIETLENIE (Słońce + Ambient) ---
     vec3 N = normalize(vNormal);
     vec3 L = normalize(uSunDir);
-    
-    // Cień: im bardziej powierzchnia jest odwrócona od słońca, tym ciemniejsza
-    float sunIntensity = max(dot(N, L), 0.0);
-    
-    // Ambient: bazowy cień (żeby w cieniach nie było czarno)
-    vec3 ambient = baseColor * 0.25f;
-    
-    // Kolor słońca (zależny od kąta)
-    vec3 sunLight = baseColor * uSunColor * sunIntensity;
-    
-    // Dodatkowe "baked lighting" (to co było wcześniej, ale delikatniej)
-    float heightFactor = clamp(vWorldPos.y * 0.1, 0.0, 0.2);
-    vec3 heightLight = baseColor * heightFactor;
 
-    vec3 finalColor = ambient + sunLight + heightLight;
-    
-    // Delikatne przyciemnienie dołu ścian (dla klimatu)
+    float NdotL = max(dot(N, L), 0.0);
+
+    // Ambient – znacznie ciemniejszy
+    vec3 ambient = baseColor * vec3(0.12, 0.13, 0.16);
+
+    // Direct sunlight
+    vec3 sunlight = baseColor * uSunColor * NdotL * 0.42;
+
+    // Subtle bounced light
+    float bounce = max(N.y, 0.0) * 0.035;
+
+    vec3 finalColor = ambient + sunlight;
+    finalColor += baseColor * bounce;
+
+    // Wall shading
     if (!isFloor) {
-        finalColor *= clamp(vWorldPos.y / 2.0, 0.5, 1.0);
+        float wallShade = mix(
+            0.65,
+            1.0,
+            smoothstep(-1.0, 2.0, vWorldPos.y)
+        );
+
+        finalColor *= wallShade;
     }
+
+    // Subtle tone mapping
+    finalColor = finalColor / (finalColor + vec3(0.75));
+
+    finalColor = pow(
+        max(finalColor, vec3(0.0)),
+        vec3(1.0 / 2.2)
+    );
 
     FragColor = vec4(finalColor, 1.0);
 }
@@ -551,42 +560,81 @@ out vec4 FragColor;
 
 uniform sampler2D uTex;
 uniform float uFlash;
-uniform vec3 uAmbientColor;  // Otoczenie (z podłogi/ścian)
-uniform float uMuzzleLight;  // Błysk z lufy
-uniform vec3 uSunColor;      // Kolor słońca
-uniform vec3 uSunDirView;    // Kierunek słońca w przestrzeni kamery
+uniform vec3 uAmbientColor;
+uniform float uMuzzleLight;
+uniform vec3 uSunColor;
+uniform vec3 uSunDirView;
 
 void main() {
     vec3 texColor = texture(uTex, vUV).rgb;
-    vec3 normal = normalize(vNormal);
-    
-    // 1. Światło słońca (w przestrzeni widoku)
-    float sunIntensity = max(dot(normal, normalize(uSunDirView)), 0.0);
-    vec3 sunLight = uSunColor * sunIntensity * 0.8f;
-    
-    // 2. Ambient z otoczenia
-    vec3 ambient = uAmbientColor * 0.6f;
-    
-    // 3. Światło kierunkowe (stare, żeby broń nie była płaska)
-    vec3 lightDir = normalize(vec3(-0.4f, -0.8f, -0.5f));
-    float diffuse = max(dot(normal, lightDir), 0.0);
-    vec3 fillLight = vec3(0.75f) * diffuse * 0.3f;
-    
-    vec3 lighting = ambient + sunLight + fillLight;
-    
-    // 4. Błysk z lufy
-    vec3 flashPos = vec3(0.25, -0.15, -0.5); 
-    float distToFlash = length(vViewPos - flashPos);
-    float flashIntensity = uMuzzleLight * max(0.0, 1.0 - (distToFlash / 1.5));
-    vec3 flashColor = vec3(1.0, 0.6, 0.2);
-    
-    lighting += flashColor * flashIntensity * 2.0;
 
-    // 5. Ostateczny kolor
-    vec3 litColor = texColor * lighting;
-    litColor *= 1.0 + uFlash * 1.6;
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(uSunDirView);
+    vec3 V = normalize(-vViewPos);
 
-    FragColor = vec4(litColor, 1.0);
+    // Ambient
+    vec3 ambient = max(
+        uAmbientColor,
+        vec3(0.12)
+    ) * 0.75;
+
+    // Sunlight
+    float NdotL = max(dot(N, L), 0.0);
+
+    vec3 diffuse = uSunColor *
+        NdotL * 0.75;
+
+    // Specular
+    vec3 H = normalize(L + V);
+
+    float specular = pow(
+        max(dot(N, H), 0.0),
+        48.0
+    ) * NdotL;
+
+    vec3 specularColor =
+        vec3(0.22, 0.25, 0.30) * specular;
+
+    // Fill lighting
+    vec3 fillDir = normalize(
+        vec3(-0.4, -0.8, -0.5)
+    );
+
+    float fill = max(dot(N, fillDir), 0.0);
+
+    vec3 fillLight =
+        vec3(0.20, 0.23, 0.28) * fill;
+
+    vec3 lighting = ambient + diffuse + fillLight;
+
+    vec3 color = texColor * lighting;
+    color += specularColor;
+
+    // Muzzle flash
+    vec3 flashPos = vec3(0.25, -0.15, -0.5);
+
+    float dist = length(vViewPos - flashPos);
+
+    float flashIntensity =
+        clamp(uMuzzleLight, 0.0, 1.0) *
+        (1.0 - smoothstep(0.0, 1.5, dist));
+
+    color += texColor *
+        vec3(1.0, 0.48, 0.16) *
+        flashIntensity * 1.8;
+
+    // Weapon flash
+    color *= 1.0 + clamp(uFlash, 0.0, 1.0) * 0.65;
+
+    // Tone mapping
+    color = color / (color + vec3(0.45));
+
+    color = pow(
+        max(color, vec3(0.0)),
+        vec3(1.0 / 2.2)
+    );
+
+    FragColor = vec4(color, 1.0);
 }
 )";
 
@@ -611,22 +659,39 @@ void main() {
 
 static const char* MUZZLE_FS = R"(
 #version 330 core
-in vec2 vUV; // Przekazujemy UV z wierzchołka, żeby wiedzieć, gdzie jesteśmy w trójkącie
+
+in vec2 vUV;
 out vec4 FragColor;
 
 void main() {
-    // vUV będzie w zakresie od -1 do 1 dla trójkąta (dzięki vertex shaderowi)
-    // Liczymy odległość od środka (0,0)
     float dist = length(vUV);
-    
-    // Tworzymy bloom: im bliżej środka, tym jaśniej
-    float intensity = exp(-dist * 4.0); // Funkcja wykładnicza daje miękkie przejście
-    
-    // Kolor: od białego w środku do pomarańczowego na brzegach
-    vec3 color = mix(vec3(1.0, 0.4, 0.1), vec3(1.0, 1.0, 0.8), intensity);
-    
-    // Alfa zależy od intensywności (żeby brzegi były przezroczyste)
-    FragColor = vec4(color * intensity, intensity);
+
+    // Core
+    float core = exp(-dist * 10.0);
+
+    // Outer glow
+    float halo = exp(-dist * 3.2) * 0.48;
+
+    float intensity = clamp(
+        core + halo,
+        0.0,
+        1.0
+    );
+
+    // Colors
+    vec3 centerColor = vec3(1.0, 0.97, 0.82);
+    vec3 outerColor = vec3(1.0, 0.24, 0.045);
+
+    vec3 color = mix(
+        outerColor,
+        centerColor,
+        smoothstep(0.05, 0.85, core)
+    );
+
+    FragColor = vec4(
+        color * intensity,
+        intensity
+    );
 }
 )";
 
