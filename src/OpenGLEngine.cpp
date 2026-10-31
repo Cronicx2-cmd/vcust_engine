@@ -973,9 +973,15 @@ void OpenGLEngine::setupGL() {
         float t=static_cast<float>(i)/static_cast<float>(kernel.size());
         kernel[i]=sample*glm::mix(0.1f,1.0f,t*t);
     }
+    std::array<float, 16 * 3> kernelData{};
+    for (std::size_t i = 0; i < kernel.size(); ++i) {
+        kernelData[i * 3 + 0] = kernel[i].x;
+        kernelData[i * 3 + 1] = kernel[i].y;
+        kernelData[i * 3 + 2] = kernel[i].z;
+    }
     glUseProgram(ssaoShader_);
     glUniform3fv(glGetUniformLocation(ssaoShader_,"uSamples[0]"),
-                 static_cast<GLsizei>(kernel.size()),glm::value_ptr(kernel[0]));
+                 static_cast<GLsizei>(kernel.size()),kernelData.data());
     glUniform1f(glGetUniformLocation(ssaoShader_,"uRadius"),0.65f);
     glUniform1f(glGetUniformLocation(ssaoShader_,"uBias"),0.025f);
     glUseProgram(0);
