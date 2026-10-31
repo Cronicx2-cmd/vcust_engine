@@ -12,6 +12,7 @@ struct ModelMaterialBatch {
     glm::vec3 specular{0.18f};
     float shininess = 24.0f;
     float opacity = 1.0f;
+    int materialId = -1;
 };
 
 class Model {
