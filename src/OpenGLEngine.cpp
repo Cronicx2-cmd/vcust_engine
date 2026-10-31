@@ -374,7 +374,7 @@ uniform float uMaterialOpacity;
 uniform vec3 uCameraPos;
 
 void main() {
-    // MTL material: Ka, Kd, Ks, Ns and d/Tr are supplied per draw batch.
+    // MTL: Ka, Kd, Ks, Ns and d/Tr are applied per material batch.
     if (uUseMtlMaterial > 0.5) {
         vec3 N = normalize(vNormal);
         vec3 L = normalize(uSunDir);
@@ -1719,7 +1719,6 @@ void OpenGLEngine::renderHealthbar(int w, int h) {
 void OpenGLEngine::drawEnemyModel(
     const std::string& objectName,
     const glm::vec3& position,
-    const glm::vec4& color,
     const Camera& camera
 ) {
     Model* model = nullptr;
@@ -1776,18 +1775,20 @@ void OpenGLEngine::drawEnemyModel(
     glUniform1f(
         glGetUniformLocation(sceneShader_, "uUseMtlMaterial"), 1.0f
     );
+    const glm::vec3 cameraPosition = camera.eyePosition();
     glUniform3fv(
         glGetUniformLocation(sceneShader_, "uCameraPos"),
-        1, glm::value_ptr(camera.eyePosition())
+        1, glm::value_ptr(cameraPosition)
     );
 
     glBindVertexArray(model->vao);
     const bool blendWasEnabled = glIsEnabled(GL_BLEND) == GL_TRUE;
 
     for (const auto& material : model->materialBatches) {
-        glUniform3fv(
+        const glm::vec4 diffuseColor(material.diffuse, 1.0f);
+        glUniform4fv(
             glGetUniformLocation(sceneShader_, "uColor"),
-            1, glm::value_ptr(material.diffuse)
+            1, glm::value_ptr(diffuseColor)
         );
         glUniform3fv(
             glGetUniformLocation(sceneShader_, "uMaterialAmbient"),

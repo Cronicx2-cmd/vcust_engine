@@ -39,7 +39,7 @@ public:
     void setGunAssets(const std::string& objPath, const Image& texImage);
     void setEnemyAssets(const std::string& objPath);
     void drawEnemyModel(const std::string& objectName, const glm::vec3& position,
-                        const glm::vec4& color, const Camera& camera);
+                        const Camera& camera);
     void drawMenu();
     void drawEnemyCube(const glm::vec3& min, const glm::vec3& max, const glm::vec4& color, const Camera& camera);
     void loadMenu(const std::string& path); // <--- PRZENIESIONE TUTAJ DO SEKCJI PUBLICZNEJ
