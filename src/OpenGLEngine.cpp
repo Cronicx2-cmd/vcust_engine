@@ -934,6 +934,16 @@ OpenGLEngine::~OpenGLEngine() {
         }
     }
 
+    auto releaseModel = [](Model& model) {
+        if (model.ebo) { glDeleteBuffers(1, &model.ebo); model.ebo = 0; }
+        if (model.vbo) { glDeleteBuffers(1, &model.vbo); model.vbo = 0; }
+        if (model.vao) { glDeleteVertexArrays(1, &model.vao); model.vao = 0; }
+        model.indexCount = 0;
+    };
+    releaseModel(enemyGruntModel_);
+    releaseModel(enemyRunnerModel_);
+    releaseModel(enemyTankModel_);
+
     // Model's destructor runs after this destructor body; zero the handles first
     // so it does not try to delete them after the GLFW context has been destroyed.
     if (gunModel_.ebo != 0) {
@@ -1462,6 +1472,20 @@ void OpenGLEngine::setGunAssets(const std::string& objPath, const Image& texImag
     gunTexture_ = makeTexture(texImage);
 }
 
+void OpenGLEngine::setEnemyAssets(const std::string& objPath) {
+    const bool gruntLoaded = enemyGruntModel_.load(objPath, "ENEMY_GRUNT");
+    const bool runnerLoaded = enemyRunnerModel_.load(objPath, "ENEMY_RUNNER");
+    const bool tankLoaded = enemyTankModel_.load(objPath, "ENEMY_TANK");
+
+    if (!gruntLoaded || !runnerLoaded || !tankLoaded) {
+        std::cerr << "Failed to load one or more enemy meshes from: "
+                  << objPath << '\n';
+    } else {
+        std::cout << "Loaded Grunt, Runner and Tank meshes from "
+                  << objPath << '\n';
+    }
+}
+
 void OpenGLEngine::drawMinimap(const Scene&, const Minimap&, const UiPush& radar) {
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -1660,28 +1684,74 @@ void OpenGLEngine::renderHealthbar(int w, int h) {
     glEnable(GL_DEPTH_TEST);
 }
 
-void OpenGLEngine::drawEnemyCube(const glm::vec3& min, const glm::vec3& max, const glm::vec4& color, const Camera& camera) {
-    glUseProgram(sceneShader_);
-    int w, h;
+void OpenGLEngine::drawEnemyModel(
+    const std::string& objectName,
+    const glm::vec3& position,
+    const glm::vec4& color,
+    const Camera& camera
+) {
+    Model* model = nullptr;
+    float modelScale = 0.65f;
+
+    if (objectName == "ENEMY_GRUNT") {
+        model = &enemyGruntModel_;
+        modelScale = 0.65f;
+    } else if (objectName == "ENEMY_RUNNER") {
+        model = &enemyRunnerModel_;
+        modelScale = 0.75f;
+    } else if (objectName == "ENEMY_TANK") {
+        model = &enemyTankModel_;
+        modelScale = 0.52f;
+    }
+
+    if (!model || model->vao == 0 || model->indexCount <= 0) return;
+
+    int w = 0, h = 0;
     glfwGetFramebufferSize(window_, &w, &h);
     if (w <= 0 || h <= 0) return;
 
-    const float aspect = static_cast<float>(w) / static_cast<float>(h);
     const glm::mat4 view = camera.view();
-    const glm::mat4 vp = camera.projection(aspect) * view;
-    glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uVP"), 1, GL_FALSE, glm::value_ptr(vp));
-    glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uView"), 1, GL_FALSE, glm::value_ptr(view));
+    const glm::mat4 vp = camera.projection(
+        static_cast<float>(w) / static_cast<float>(h)
+    ) * view;
 
-    glm::vec3 center = (min + max) * 0.5f;
-    glm::vec3 scale = (max - min);
-    glUniform3fv(glGetUniformLocation(sceneShader_, "uOffset"), 1, glm::value_ptr(center));
-    glUniform3fv(glGetUniformLocation(sceneShader_, "uScale"), 1, glm::value_ptr(scale));
-    glUniform4fv(glGetUniformLocation(sceneShader_, "uColor"), 1, glm::value_ptr(color));
-    glUniform1f(glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 0.0f);
-    glUniform1f(glGetUniformLocation(sceneShader_, "uUseSolidColor"), 1.0f);
+    glUseProgram(sceneShader_);
+    glUniformMatrix4fv(
+        glGetUniformLocation(sceneShader_, "uVP"),
+        1, GL_FALSE, glm::value_ptr(vp)
+    );
+    glUniformMatrix4fv(
+        glGetUniformLocation(sceneShader_, "uView"),
+        1, GL_FALSE, glm::value_ptr(view)
+    );
 
-    glBindVertexArray(cubeVAO_);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
+    const glm::vec3 scale(modelScale);
+    // Enemy positions are stored at the old cube center (Y = 0.5).
+    // The OBJ meshes are authored with their feet at Y = 0.
+    const glm::vec3 offset = position - glm::vec3(0.0f, 0.5f, 0.0f);
+    glUniform3fv(
+        glGetUniformLocation(sceneShader_, "uOffset"),
+        1, glm::value_ptr(offset)
+    );
+    glUniform3fv(
+        glGetUniformLocation(sceneShader_, "uScale"),
+        1, glm::value_ptr(scale)
+    );
+    glUniform4fv(
+        glGetUniformLocation(sceneShader_, "uColor"),
+        1, glm::value_ptr(color)
+    );
+    glUniform1f(
+        glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 0.0f
+    );
+    glUniform1f(
+        glGetUniformLocation(sceneShader_, "uUseSolidColor"), 1.0f
+    );
+
+    glBindVertexArray(model->vao);
+    glDrawElements(
+        GL_TRIANGLES, model->indexCount, GL_UNSIGNED_INT, nullptr
+    );
     glBindVertexArray(0);
 }
 
