@@ -63,16 +63,13 @@ void Enemy::draw(OpenGLEngine& engine, const Camera& camera) const {
 
     switch (type_) {
         case EnemyType::Grunt:
-            engine.drawEnemyModel("ENEMY_GRUNT", position_,
-                                  glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), camera);
+            engine.drawEnemyModel("ENEMY_GRUNT", position_, camera);
             break;
         case EnemyType::Runner:
-            engine.drawEnemyModel("ENEMY_RUNNER", position_,
-                                  glm::vec4(1.0f, 0.5f, 0.0f, 0.0f), camera);
+            engine.drawEnemyModel("ENEMY_RUNNER", position_, camera);
             break;
         case EnemyType::Tank:
-            engine.drawEnemyModel("ENEMY_TANK", position_,
-                                  glm::vec4(0.8f, 0.0f, 0.8f, 0.0f), camera);
+            engine.drawEnemyModel("ENEMY_TANK", position_, camera);
             break;
     }
 }
