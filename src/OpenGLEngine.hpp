@@ -52,6 +52,8 @@ public:
 
 private:
     void setupGL();
+    bool ensureSsaoTargets(int width, int height);
+    void destroySsaoTargets();
     void drawSkybox(const Camera& camera, int w, int h);
     void drawScene(const Scene& scene, const Camera& camera, const glm::vec3& playerPos);
     void drawMinimap(const Scene& scene, const Minimap& minimap, const UiPush& radar);
@@ -84,11 +86,17 @@ private:
     GLFWwindow* window_{nullptr};
 
     uint32_t skyboxShader_{0}, sceneShader_{0}, uiShader_{0};
+    uint32_t ssaoShader_{0}, compositeShader_{0};
     uint32_t gunShader_{0};
     uint32_t menuShader_{0};
     
     uint32_t skyboxVAO_{0}, cubeVAO_{0}, quadVAO_{0};
     uint32_t brushVAO_{0}, brushVBO_{0};
+
+    // Screen-space ambient occlusion render targets.
+    GLuint sceneFbo_{0}, sceneColorTex_{0}, sceneNormalTex_{0}, sceneDepthTex_{0};
+    GLuint ssaoFbo_{0}, ssaoColorTex_{0};
+    int ssaoWidth_{0}, ssaoHeight_{0};
     std::uint64_t brushMeshRevision_{0};
 
     // Bufory wierzchołków
