@@ -1,17 +1,57 @@
-background    bg.png          # ścieżka względna do katalogu mapy (render z Blendera)
+# ASHFIELD - mapa inspirowana klimatem Silent Hill
+# Wymiary: ok. 40 x 36 jednostek. Układ: opuszczony kompleks / korytarze.
+background    bg.png
 floor_tex     floor.png
 wall_tex      wall.png
-coords        engine          # engine | blender; blender: (x,y,z) -> (x,z,-y); dotyczy dyrektyw PONIŻEJ
-camera_pos    0 3.2 7.5
-camera_look   0 1.0 0         # = camera_pos + kierunek patrzenia kamery z Blendera (oś -Z kamery)
-camera_fov    50              # poziomy FOV [deg] (Blender: render poziomy, sensor fit Auto)
-player_start 0 0 2
-bounds -18 -1 -11 18 3 11
-floor -16 -1 -9 17 -0.9 9
-wall -1 0 -1 1 2 1
-wall 3 0 -4 4 2 0
-wall 4 0 -4 15 3 -3
-wall -17 0 -9 -16 3 10
-wall -16 0 9 17 3 10
-wall 16 0 -9 17 3 10
-wall -17 0 -10 17 3 -9
+coords        engine
+
+camera_pos    0 1.65 14.5
+camera_look   0 1.45 0
+camera_fov    68
+player_start  0 0 14.5
+bounds       -20 -1 -18 20 4 18
+
+# Posadzka
+floor        -19.4 -1 -17.4 19.4 -0.9 17.4
+
+# Zewnętrzne ściany - północ, południe, zachód, wschód
+brush_box wall -20 0 -18 20 3.6 -17.4
+brush_box wall -20 0 17.4 20 3.6 18
+brush_box wall -20 0 -17.4 -19.4 3.6 17.4
+brush_box wall 19.4 0 -17.4 20 3.6 17.4
+
+# Główna oś korytarza - celowo nierówna, z przewężeniami
+brush_box wall -8.5 0 -13  -7.9 3.2 7
+brush_box wall 7.2 0 -17.4 7.8 3.2 5.5
+brush_box wall -7.9 0 -3.5 7.2 3.2 -2.9
+brush_box wall -7.9 0 5.0 7.2 3.2 5.6
+
+# Zachodnie skrzydło: małe pomieszczenia i ślepe przejście
+brush_box wall -19.4 0 -9.0 -12.0 3.2 -8.4
+brush_box wall -12.0 0 -17.4 -11.4 3.2 -8.4
+brush_box wall -17.0 0 -8.4 -16.4 3.2 -1.0
+brush_box wall -19.4 0 -1.6 -16.4 3.2 -1.0
+brush_box wall -12.0 0 -1.6 -11.4 3.2 7.0
+brush_box wall -19.4 0 6.4 -11.4 3.2 7.0
+brush_box wall -15.5 0 7.0 -14.9 3.2 13.0
+
+# Wschodnie skrzydło: długi, łamany korytarz
+brush_box wall 7.8 0 -11.5 14.0 3.2 -10.9
+brush_box wall 13.4 0 -10.9 14.0 3.2 -3.0
+brush_box wall 14.0 0 -3.6 19.4 3.2 -3.0
+brush_box wall 10.0 0 2.0 10.6 3.2 12.0
+brush_box wall 10.6 0 11.4 19.4 3.2 12.0
+
+# Dodatkowe przegrody tworzące wnęki i zakręty
+brush_box wall -4.5 0 -17.4 -3.9 3.0 -10.0
+brush_box wall -3.9 0 -10.6 3.5 3.0 -10.0
+brush_box wall 3.0 0 -9.4 3.6 3.0 -3.5
+brush_box wall -7.9 0 9.0 -2.0 3.0 9.6
+brush_box wall 2.0 0 9.0 7.2 3.0 9.6
+brush_box wall -2.6 0 9.6 -2.0 3.0 15.0
+brush_box wall 2.0 0 9.6 2.6 3.0 15.0
+
+# Niskie metalowe przeszkody / elementy konstrukcji
+brush_box metal -6.5 0 -0.5 -5.9 1.1 2.8
+brush_box metal 5.0 0 -0.5 5.6 1.1 2.8
+brush_box panel -1.0 0 -15.0 1.0 2.4 -14.5
