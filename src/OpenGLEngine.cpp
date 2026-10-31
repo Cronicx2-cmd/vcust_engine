@@ -365,8 +365,16 @@ uniform sampler2D uFloorTex;
 uniform sampler2D uWallTex;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
+uniform float uUseSolidColor;
 
 void main() {
+    // Wrogowie używają koloru przekazanego przez uColor, a nie tekstury ściany.
+    if (uUseSolidColor > 0.5) {
+        FragColor = vec4(vColor, 1.0);
+        NormalColor = vec4(normalize(vViewNormal), 1.0);
+        return;
+    }
+
     bool isFloor = vMaterial > 0.5 && vMaterial < 1.5;
 
     vec3 baseColor = isFloor
@@ -1236,6 +1244,7 @@ void OpenGLEngine::drawSkybox(const Camera& camera, int w, int h) {
 void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm::vec3& playerPos) {
     glUseProgram(sceneShader_);
     glUniform1f(glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 0.0f);
+    glUniform1f(glGetUniformLocation(sceneShader_, "uUseSolidColor"), 0.0f);
     int w, h;
     glfwGetFramebufferSize(window_, &w, &h);
     const float aspect = float(w) / float(h);
@@ -1655,15 +1664,21 @@ void OpenGLEngine::drawEnemyCube(const glm::vec3& min, const glm::vec3& max, con
     glUseProgram(sceneShader_);
     int w, h;
     glfwGetFramebufferSize(window_, &w, &h);
-    const float aspect = float(w) / float(h);
-    const glm::mat4 vp = camera.projection(aspect) * camera.view();
+    if (w <= 0 || h <= 0) return;
+
+    const float aspect = static_cast<float>(w) / static_cast<float>(h);
+    const glm::mat4 view = camera.view();
+    const glm::mat4 vp = camera.projection(aspect) * view;
     glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uVP"), 1, GL_FALSE, glm::value_ptr(vp));
+    glUniformMatrix4fv(glGetUniformLocation(sceneShader_, "uView"), 1, GL_FALSE, glm::value_ptr(view));
 
     glm::vec3 center = (min + max) * 0.5f;
     glm::vec3 scale = (max - min);
     glUniform3fv(glGetUniformLocation(sceneShader_, "uOffset"), 1, glm::value_ptr(center));
     glUniform3fv(glGetUniformLocation(sceneShader_, "uScale"), 1, glm::value_ptr(scale));
     glUniform4fv(glGetUniformLocation(sceneShader_, "uColor"), 1, glm::value_ptr(color));
+    glUniform1f(glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 0.0f);
+    glUniform1f(glGetUniformLocation(sceneShader_, "uUseSolidColor"), 1.0f);
 
     glBindVertexArray(cubeVAO_);
     glDrawArrays(GL_TRIANGLES, 0, 36);
