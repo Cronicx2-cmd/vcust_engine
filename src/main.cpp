@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
             engine.setEnemyAssets(enemyObjPath.string());
         } else {
             std::cerr << "Enemy model file not found: "
-                      << enemyObjPath.string() << '\\n';
+                      << enemyObjPath.string() << '\n';
         }
 
         auto applyScene = [&](const std::string& id, bool resetPlayer) {
