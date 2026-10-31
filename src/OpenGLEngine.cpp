@@ -366,8 +366,39 @@ uniform sampler2D uWallTex;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform float uUseSolidColor;
+uniform float uUseMtlMaterial;
+uniform vec3 uMaterialAmbient;
+uniform vec3 uMaterialSpecular;
+uniform float uMaterialShininess;
+uniform float uMaterialOpacity;
+uniform vec3 uCameraPos;
 
 void main() {
+    // MTL material: Ka, Kd, Ks, Ns and d/Tr are supplied per draw batch.
+    if (uUseMtlMaterial > 0.5) {
+        vec3 N = normalize(vNormal);
+        vec3 L = normalize(uSunDir);
+        vec3 V = normalize(uCameraPos - vWorldPos);
+        vec3 H = normalize(L + V);
+
+        float diffuse = max(dot(N, L), 0.0);
+        float specular = pow(
+            max(dot(N, H), 0.0),
+            max(uMaterialShininess, 1.0)
+        );
+
+        vec3 ambientTerm = vColor * max(uMaterialAmbient, vec3(0.035)) * 1.8;
+        vec3 diffuseTerm = vColor * uSunColor * diffuse * 0.48;
+        vec3 specularTerm = uMaterialSpecular * specular * 0.22;
+        vec3 litColor = ambientTerm + diffuseTerm + specularTerm;
+        litColor = litColor / (litColor + vec3(0.75));
+        litColor = pow(max(litColor, vec3(0.0)), vec3(1.0 / 2.2));
+
+        FragColor = vec4(litColor, clamp(uMaterialOpacity, 0.0, 1.0));
+        NormalColor = vec4(normalize(vViewNormal), 1.0);
+        return;
+    }
+
     // Wrogowie używają koloru przekazanego przez uColor, a nie tekstury ściany.
     if (uUseSolidColor > 0.5) {
         FragColor = vec4(vColor, 1.0);
@@ -1255,6 +1286,7 @@ void OpenGLEngine::drawScene(const Scene& scene, const Camera& camera, const glm
     glUseProgram(sceneShader_);
     glUniform1f(glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 0.0f);
     glUniform1f(glGetUniformLocation(sceneShader_, "uUseSolidColor"), 0.0f);
+    glUniform1f(glGetUniformLocation(sceneShader_, "uUseMtlMaterial"), 0.0f);
     int w, h;
     glfwGetFramebufferSize(window_, &w, &h);
     const float aspect = float(w) / float(h);
@@ -1726,8 +1758,6 @@ void OpenGLEngine::drawEnemyModel(
     );
 
     const glm::vec3 scale(modelScale);
-    // Enemy positions are stored at the old cube center (Y = 0.5).
-    // The OBJ meshes are authored with their feet at Y = 0.
     const glm::vec3 offset = position - glm::vec3(0.0f, 0.5f, 0.0f);
     glUniform3fv(
         glGetUniformLocation(sceneShader_, "uOffset"),
@@ -1737,22 +1767,69 @@ void OpenGLEngine::drawEnemyModel(
         glGetUniformLocation(sceneShader_, "uScale"),
         1, glm::value_ptr(scale)
     );
-    glUniform4fv(
-        glGetUniformLocation(sceneShader_, "uColor"),
-        1, glm::value_ptr(color)
-    );
     glUniform1f(
         glGetUniformLocation(sceneShader_, "uUseVertexMaterial"), 0.0f
     );
     glUniform1f(
-        glGetUniformLocation(sceneShader_, "uUseSolidColor"), 1.0f
+        glGetUniformLocation(sceneShader_, "uUseSolidColor"), 0.0f
+    );
+    glUniform1f(
+        glGetUniformLocation(sceneShader_, "uUseMtlMaterial"), 1.0f
+    );
+    glUniform3fv(
+        glGetUniformLocation(sceneShader_, "uCameraPos"),
+        1, glm::value_ptr(camera.eyePosition())
     );
 
     glBindVertexArray(model->vao);
-    glDrawElements(
-        GL_TRIANGLES, model->indexCount, GL_UNSIGNED_INT, nullptr
-    );
+    const bool blendWasEnabled = glIsEnabled(GL_BLEND) == GL_TRUE;
+
+    for (const auto& material : model->materialBatches) {
+        glUniform3fv(
+            glGetUniformLocation(sceneShader_, "uColor"),
+            1, glm::value_ptr(material.diffuse)
+        );
+        glUniform3fv(
+            glGetUniformLocation(sceneShader_, "uMaterialAmbient"),
+            1, glm::value_ptr(material.ambient)
+        );
+        glUniform3fv(
+            glGetUniformLocation(sceneShader_, "uMaterialSpecular"),
+            1, glm::value_ptr(material.specular)
+        );
+        glUniform1f(
+            glGetUniformLocation(sceneShader_, "uMaterialShininess"),
+            material.shininess
+        );
+        glUniform1f(
+            glGetUniformLocation(sceneShader_, "uMaterialOpacity"),
+            material.opacity
+        );
+
+        const bool transparent = material.opacity < 0.999f;
+        if (transparent) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        } else if (!blendWasEnabled) {
+            glDisable(GL_BLEND);
+        }
+
+        glDrawElements(
+            GL_TRIANGLES,
+            static_cast<GLsizei>(material.indexCount),
+            GL_UNSIGNED_INT,
+            reinterpret_cast<const void*>(
+                static_cast<std::uintptr_t>(material.firstIndex) *
+                sizeof(unsigned int)
+            )
+        );
+    }
+
+    if (!blendWasEnabled) glDisable(GL_BLEND);
     glBindVertexArray(0);
+    glUniform1f(
+        glGetUniformLocation(sceneShader_, "uUseMtlMaterial"), 0.0f
+    );
 }
 
 void OpenGLEngine::drawMenu() {
